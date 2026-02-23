@@ -16,19 +16,22 @@
 # MAGIC       LLM doc type detection from controlled vocabulary; safety filter handling logged as
 # MAGIC       distinct status; confidence flag now triggers on medium and low (not just low);
 # MAGIC       gedcom_id column added ready for downstream person matching
+# MAGIC - v3: GIF support added; exponential backoff for 429 rate limit errors; robust JSON
+# MAGIC       extraction (outermost { } rather than fence stripping); improved prompt — explicit
+# MAGIC       JSON-only instruction, negative examples, output skeleton at end; PoorLawRecord
+# MAGIC       added to controlled vocabulary; explicit Spark schema on write (eliminates cast hacks)
 
 # COMMAND ----------
-
 # MAGIC %md ## 1. Setup & Configuration
 
 # COMMAND ----------
-
-# MAGIC %pip install google-cloud-aiplatform --upgrade
+# MAGIC %pip install google-cloud-aiplatform pymupdf --upgrade
 
 # COMMAND ----------
 
 import json
 import re
+import time
 import base64
 import traceback
 from datetime import datetime, timezone
@@ -40,10 +43,12 @@ from vertexai.generative_models import GenerativeModel, Part
 from google.oauth2 import service_account
 
 from pyspark.sql import functions as F
-from pyspark.sql.types import IntegerType
+from pyspark.sql.types import (
+    StructType, StructField, StringType, IntegerType,
+    BooleanType, TimestampType
+)
 
 # COMMAND ----------
-
 # MAGIC %md ### Parameters
 # MAGIC
 # MAGIC When running as a Databricks Job, set `folder_name` as a job parameter.
@@ -57,11 +62,15 @@ FOLDER_NAME = dbutils.widgets.get("folder_name")
 # COMMAND ----------
 
 # --- Core configuration ---
-GCP_PROJECT        = "genealogy-488213"   # Replace with your GCP project ID
-GCP_LOCATION       = "global"                # Latest Gemini models require global endpoint
+GCP_PROJECT        = "genealogy-488213"
+GCP_LOCATION       = "global"           # Latest Gemini models require global endpoint
 VERTEX_MODEL       = "gemini-3-pro-preview"
 SECRET_SCOPE       = "genealogy"
 SECRET_KEY         = "gcp_service_account_json"
+
+# --- Retry / rate limit ---
+MAX_RETRIES        = 3
+RETRY_DELAYS       = [10, 30, 90]       # Seconds between retries (exponential backoff)
 
 # --- Unity Catalog ---
 CATALOG            = "workspace"
@@ -89,6 +98,7 @@ DOC_TYPE_VOCABULARY = [
     "ElectoralRegister",
     "MilitaryRecord",
     "BMDIndex",
+    "PoorLawRecord",
     "Other",
 ]
 
@@ -98,7 +108,6 @@ print(f"Transcriptions    : {TRANSCRIPTIONS_TBL}")
 print(f"Processing log    : {PROC_LOG_TBL}")
 
 # COMMAND ----------
-
 # MAGIC %md ### Initialise Vertex AI
 
 # COMMAND ----------
@@ -119,12 +128,11 @@ model = GenerativeModel(VERTEX_MODEL)
 print(f"Vertex AI initialised. Model: {VERTEX_MODEL}")
 
 # COMMAND ----------
-
 # MAGIC %md ## 2. Create / Upgrade Delta Tables
 # MAGIC
 # MAGIC `CREATE TABLE IF NOT EXISTS` is idempotent — safe to rerun.
-# MAGIC `ALTER TABLE ... ADD COLUMN` statements add v2 columns to existing tables;
-# MAGIC they silently pass if the column already exists.
+# MAGIC `ALTER TABLE ... ADD COLUMN` statements add new columns to existing tables
+# MAGIC and silently pass if the column already exists.
 
 # COMMAND ----------
 
@@ -154,17 +162,15 @@ spark.sql(f"""
     COMMENT 'OCR transcriptions of scanned genealogy documents'
 """)
 
-# Add v2 columns to any existing table created by v1
-for col_def in [
+for col_name, col_spec in [
     ("doc_type_detected", "STRING COMMENT 'Document type classified by Gemini — controlled vocabulary'"),
     ("gedcom_id",         "STRING COMMENT 'Matched person_gedcom_id — populated by downstream matching'"),
 ]:
-    col_name, col_spec = col_def
     try:
         spark.sql(f"ALTER TABLE {TRANSCRIPTIONS_TBL} ADD COLUMN {col_name} {col_spec}")
         print(f"Added column {col_name} to {TRANSCRIPTIONS_TBL}")
     except Exception:
-        pass  # Column already exists — expected on reruns
+        pass  # Column already exists
 
 spark.sql(f"""
     CREATE TABLE IF NOT EXISTS {PROC_LOG_TBL} (
@@ -184,19 +190,21 @@ spark.sql(f"""
 print("Tables ready.")
 
 # COMMAND ----------
-
 # MAGIC %md ## 3. File Discovery
 
 # COMMAND ----------
 
 # Magic byte signatures → (mime_type, canonical_extension)
-# Used for extensionless files where we cannot rely on the filename
+# Covers extensionless files and GIFs (which have no entry in EXTENSION_MIME_MAP
+# because we detect them via magic bytes and Gemini accepts image/gif natively)
 MAGIC_SIGNATURES = [
-    (b'\xff\xd8\xff',       "image/jpeg",       ".jpg"),
-    (b'\x89PNG\r\n\x1a\n',  "image/png",        ".png"),
-    (b'II*\x00',            "image/tiff",       ".tif"),   # TIFF little-endian
-    (b'MM\x00*',            "image/tiff",       ".tif"),   # TIFF big-endian
-    (b'%PDF',               "application/pdf",  ".pdf"),
+    (b'\xff\xd8\xff',         "image/jpeg",       ".jpg"),
+    (b'\x89PNG\r\n\x1a\n',    "image/png",        ".png"),
+    (b'II*\x00',              "image/tiff",       ".tif"),   # TIFF little-endian
+    (b'MM\x00*',              "image/tiff",       ".tif"),   # TIFF big-endian
+    (b'%PDF',                 "application/pdf",  ".pdf"),
+    (b'GIF87a',               "image/gif",        ".gif"),
+    (b'GIF89a',               "image/gif",        ".gif"),
 ]
 
 EXTENSION_MIME_MAP = {
@@ -206,6 +214,7 @@ EXTENSION_MIME_MAP = {
     ".tif":  "image/tiff",
     ".tiff": "image/tiff",
     ".pdf":  "application/pdf",
+    ".gif":  "image/gif",
 }
 
 
@@ -251,7 +260,7 @@ processed_ids = spark.sql(f"""
     WHERE status = 'success'
 """)
 
-# Do NOT filter on extension — get_mime_type() handles extensionless files at runtime
+# Do NOT filter on extension here — get_mime_type() handles this at runtime
 to_process_df = (
     source_df
     .join(processed_ids, on="file_id", how="left_anti")
@@ -263,7 +272,6 @@ for row in to_process_df:
     print(f"  {row.file_path}  ({row.size:,} bytes)")
 
 # COMMAND ----------
-
 # MAGIC %md ## 4. Filename Parser
 
 # COMMAND ----------
@@ -307,16 +315,24 @@ DOC_TYPE_MAP = {
         "probate record", "19th or early 20th century",
         "deceased's name, estate value, executors, date of probate, court"
     ),
+    "grant": (
+        "grant of probate", "19th or early 20th century",
+        "deceased's name, estate value, executors, date of grant, court"
+    ),
     "newspaper":  ("newspaper clipping", "Victorian or Edwardian era", "all text as printed including headline and captions"),
     "gazette":    ("newspaper or gazette clipping", "Victorian or Edwardian era", "all text as printed"),
     "advertiser": ("newspaper clipping", "Victorian or Edwardian era", "all text as printed"),
     "herald":     ("newspaper clipping", "Victorian or Edwardian era", "all text as printed"),
+    "observer":   ("newspaper clipping", "Victorian or Edwardian era", "all text as printed"),
     "times":      ("newspaper clipping", "Victorian or Edwardian era", "all text as printed"),
     "baptism": (
         "baptism register entry", "18th or 19th century",
         "child's name, date of baptism, parents' names, father's occupation, parish"
     ),
-    "bapt":   ("baptism register entry", "18th or 19th century", "child's name, date of baptism, parents' names, parish"),
+    "bapt": (
+        "baptism register entry", "18th or 19th century",
+        "child's name, date of baptism, parents' names, parish"
+    ),
     "burial": (
         "burial register entry", "18th or 19th century",
         "name of deceased, date of burial, age, abode, officiant, parish"
@@ -328,6 +344,14 @@ DOC_TYPE_MAP = {
     "military": (
         "military service record", "World War I or World War II era",
         "name, rank, regiment, service number, date of enlistment, postings, medical notes"
+    ),
+    "poorlaw": (
+        "Poor Law parochial relief application", "19th century",
+        "applicant name, family members, ages, address, parish, reason for application, decision"
+    ),
+    "poor": (
+        "Poor Law parochial relief application", "19th century",
+        "applicant name, family members, ages, address, parish, reason for application, decision"
     ),
     "bmd": (
         "civil registration BMD index entry", "19th or early 20th century",
@@ -380,7 +404,6 @@ def get_doc_type_context(doc_type: str) -> tuple:
     return ("historical document", "19th or early 20th century", "all visible text and fields")
 
 # COMMAND ----------
-
 # MAGIC %md ## 5. Prompt Builder
 
 # COMMAND ----------
@@ -388,16 +411,21 @@ def get_doc_type_context(doc_type: str) -> tuple:
 def build_prompt(metadata: dict) -> str:
     """
     Build a Gemini transcription prompt from parsed filename metadata.
-    Instructs Gemini to classify document type from the controlled vocabulary
-    and return structured JSON.
+
+    Key prompt design principles (v3):
+    - JSON-only instruction is both positive ("return only") AND negative ("do not wrap",
+      "do not add commentary") to reduce fence/preamble failures
+    - Output skeleton appears at the very end of the prompt — LLMs weight end-of-prompt heavily
+    - Vocabulary list appears immediately before the skeleton so doc_type_detected
+      values are fresh in context when the skeleton is read
     """
     doc_desc, era, fields = get_doc_type_context(metadata.get("doc_type"))
 
     subject_hint = ""
     if metadata.get("forename") and metadata.get("surname"):
-        subject_hint = f"The document relates to **{metadata['forename']} {metadata['surname']}**"
+        subject_hint = f"The document relates to {metadata['forename']} {metadata['surname']}"
         if metadata.get("year"):
-            subject_hint += f", circa **{metadata['year']}**"
+            subject_hint += f", circa {metadata['year']}"
         subject_hint += "."
 
     vocab_list = "\n".join(f"  - {v}" for v in DOC_TYPE_VOCABULARY)
@@ -405,10 +433,6 @@ def build_prompt(metadata: dict) -> str:
     return f"""You are an expert historical document transcriptionist specialising in {era} {doc_desc}s and the handwriting styles of that period.
 
 {subject_hint}
-
-## Task
-
-Transcribe the document exactly as written, then return your output as a single JSON block.
 
 ## Transcription Rules
 
@@ -420,87 +444,132 @@ Transcribe the document exactly as written, then return your output as a single 
 - Transcribe all fields visible in the document, paying particular attention to: {fields}
 - For tabular or multi-column documents, preserve the row and column structure in your transcription
 
-## JSON Output Structure
+## Output Format
 
-Return a single JSON block with no additional commentary before or after it, using exactly these fields:
+Your response must be a single JSON object and nothing else.
 
-- `transcription`: full text content of the document, preserving layout where applicable
-- `doc_type_detected`: classify this document using exactly one value from this list:
+Do not include any text, explanation, or commentary before or after the JSON.
+Do not wrap the JSON in markdown code fences.
+Do not use ```json or ```.
+Do not add a preamble sentence.
+Your entire response must be valid JSON starting with {{ and ending with }}.
+
+Use exactly this structure, choosing doc_type_detected from the vocabulary below:
+
+Vocabulary for doc_type_detected:
 {vocab_list}
-- `confidence`: one of "high", "medium", or "low" reflecting your overall transcription confidence
-- `confidence_notes`: brief explanation of any factors affecting confidence (ink fading, damage, ambiguous letterforms). If no issues, write "No significant issues."
-- `personal_names`: JSON array of all personal names found, spelled exactly as written
-- `locations`: JSON array of all place names found, spelled exactly as written
-- `uncertain_entries`: JSON array of objects, each with "entry" (best reading), "field" (which column or field), and "reason" (why uncertain)
 
-Return only the JSON block."""
+{{
+  "transcription": "full text of the document, preserving layout",
+  "doc_type_detected": "exactly one value from the vocabulary above",
+  "confidence": "high or medium or low",
+  "confidence_notes": "brief note on factors affecting confidence, or No significant issues.",
+  "personal_names": ["name as written", "name as written"],
+  "locations": ["place as written", "place as written"],
+  "uncertain_entries": [
+    {{"entry": "best reading", "field": "column or field name", "reason": "why uncertain"}}
+  ]
+}}"""
 
 # COMMAND ----------
-
 # MAGIC %md ## 6. OCR Functions
 
 # COMMAND ----------
 
-def split_pdf_to_page_images(file_path: str) -> tuple[list[bytes], str]:
+def split_pdf_to_page_images(file_path: str) -> tuple:
     """
-    Split a PDF into a list of JPEG image bytes using PyMuPDF (fitz).
-    No OS-level dependencies required — MuPDF is bundled in the PyMuPDF wheel.
+    Split a PDF into a list of JPEG image bytes using PyMuPDF.
+    PyMuPDF ships MuPDF as a bundled wheel — no OS-level dependencies needed,
+    so this works on Databricks serverless compute.
     Returns (list_of_page_bytes, mime_type).
     """
-    import pymupdf  # imported here so the rest of the notebook works if install fails
-    
+    import pymupdf
+
     doc = pymupdf.open(file_path)
     page_bytes = []
     for page in doc:
-        # Render at 2x scale (144 DPI equivalent) for good OCR quality
+        # Render at 2x scale (~144 DPI) — good OCR quality without excessive token use
         mat = pymupdf.Matrix(2, 2)
         pix = page.get_pixmap(matrix=mat)
         page_bytes.append(pix.tobytes("jpeg"))
     doc.close()
-    
+
     print(f"    PDF split into {len(page_bytes)} page image(s) via PyMuPDF")
     return page_bytes, "image/jpeg"
 
 
-def call_gemini(file_bytes: bytes, mime_type: str, prompt: str) -> dict:
+def extract_json(text: str) -> str:
     """
-    Send file bytes to Gemini and return a parsed dict.
-    Returns {"_safety_blocked": True} when the response is blocked by safety filters,
-    rather than raising an exception, so the caller can log it distinctly.
+    Robustly extract a JSON object from Gemini's response text.
+    Finds the outermost { ... } regardless of any surrounding text,
+    preamble sentences, or markdown fences. This is more reliable than
+    trying to strip specific fence patterns.
     """
-    file_part = Part.from_data(data=file_bytes, mime_type=mime_type)
+    match = re.search(r'\{.*\}', text, re.DOTALL)
+    if match:
+        return match.group(0)
+    return text  # Return as-is and let json.loads raise a clear error
 
-    response = model.generate_content(
-        [file_part, prompt],
-        generation_config={"temperature": 0.1, "max_output_tokens": 8192},
-    )
 
-    # Detect safety block — candidates empty or content has no parts
-    if not response.candidates:
-        return {"_safety_blocked": True}
-    candidate = response.candidates[0]
-    if not candidate.content or not candidate.content.parts:
-        return {"_safety_blocked": True, "_finish_reason": str(getattr(candidate, "finish_reason", "unknown"))}
+def call_gemini_with_retry(file_bytes: bytes, mime_type: str, prompt: str) -> dict:
+    """
+    Send file bytes to Gemini with exponential backoff on 429 rate limit errors.
+    Returns a parsed dict, or {"_safety_blocked": True} for safety filter blocks.
+    Raises on non-retryable errors after MAX_RETRIES attempts.
+    """
+    last_error = None
 
-    raw_text = response.text.strip()
+    for attempt in range(MAX_RETRIES):
+        try:
+            file_part = Part.from_data(data=file_bytes, mime_type=mime_type)
 
-    # Strip markdown code fences if present
-    raw_text = re.sub(r'^```json\s*', '', raw_text, flags=re.MULTILINE)
-    raw_text = re.sub(r'```\s*$',     '', raw_text, flags=re.MULTILINE)
-    raw_text = raw_text.strip()
+            response = model.generate_content(
+                [file_part, prompt],
+                generation_config={"temperature": 0.1, "max_output_tokens": 8192},
+            )
 
-    try:
-        return json.loads(raw_text)
-    except json.JSONDecodeError:
-        return {
-            "transcription":    raw_text,
-            "doc_type_detected": "Other",
-            "confidence":        "low",
-            "confidence_notes":  "Gemini response could not be parsed as JSON — raw text preserved.",
-            "personal_names":    [],
-            "locations":         [],
-            "uncertain_entries": [],
-        }
+            # Detect safety block — candidates empty or content has no parts
+            if not response.candidates:
+                return {"_safety_blocked": True}
+            candidate = response.candidates[0]
+            if not candidate.content or not candidate.content.parts:
+                return {
+                    "_safety_blocked": True,
+                    "_finish_reason": str(getattr(candidate, "finish_reason", "unknown")),
+                }
+
+            raw_text = response.text.strip()
+
+            # Extract outermost JSON object — handles preambles and fences
+            raw_text = extract_json(raw_text)
+
+            try:
+                return json.loads(raw_text)
+            except json.JSONDecodeError:
+                # Gemini returned something unparseable — preserve raw text
+                return {
+                    "transcription":     raw_text,
+                    "doc_type_detected": "Other",
+                    "confidence":        "low",
+                    "confidence_notes":  "Gemini response could not be parsed as JSON — raw text preserved.",
+                    "personal_names":    [],
+                    "locations":         [],
+                    "uncertain_entries": [],
+                }
+
+        except Exception as e:
+            error_str = str(e)
+            if "429" in error_str or "Resource exhausted" in error_str:
+                if attempt < MAX_RETRIES - 1:
+                    delay = RETRY_DELAYS[attempt]
+                    print(f"    Rate limited (429) — waiting {delay}s before retry {attempt + 2}/{MAX_RETRIES}")
+                    time.sleep(delay)
+                    last_error = e
+                    continue
+            # Non-429 error or final attempt — re-raise
+            raise
+
+    raise last_error
 
 
 def ocr_file(file_path: str, metadata: dict) -> tuple:
@@ -528,7 +597,7 @@ def ocr_file(file_path: str, metadata: dict) -> tuple:
 
     rows = []
     for page_index, page_bytes in enumerate(pages_bytes, 1):
-        result = call_gemini(page_bytes, page_mime, prompt)
+        result = call_gemini_with_retry(page_bytes, page_mime, prompt)
 
         if result.get("_safety_blocked"):
             return [], "safety_blocked"
@@ -549,9 +618,9 @@ def ocr_file(file_path: str, metadata: dict) -> tuple:
             "uncertain_entries": json.dumps(result.get("uncertain_entries", [])),
             "confidence":        result.get("confidence", "low"),
             "confidence_notes":  result.get("confidence_notes", ""),
-            # Flag medium and low confidence — not just low
+            # Flag medium and low — anything that is not high warrants a check
             "confidence_flag":   result.get("confidence", "low") != "high",
-            "gedcom_id":         None,   # Populated by downstream person-matching process
+            "gedcom_id":         None,
             "model_used":        VERTEX_MODEL,
             "processed_at":      now,
         })
@@ -559,7 +628,6 @@ def ocr_file(file_path: str, metadata: dict) -> tuple:
     return rows, "success"
 
 # COMMAND ----------
-
 # MAGIC %md ## 7. Processing Loop
 
 # COMMAND ----------
@@ -581,14 +649,15 @@ for i, file_row in enumerate(to_process_df, 1):
 
     print(f"[{i}/{total}] {file_name}")
 
-    # Check file type early — avoids unnecessary Gemini calls for genuinely unsupported files
+    # Check file type early — avoids Gemini calls for genuinely unsupported files
     type_info = get_mime_type(file_path)
     if type_info is None:
         print(f"  ⚠ Skipped — unrecognised file type")
         log_rows.append({
             "file_id": file_id, "file_name": file_name, "folder_path": FOLDER_PATH,
             "status": "skipped", "page_count": 0, "model_used": VERTEX_MODEL,
-            "processed_at": now, "error_message": "Unrecognised file type — no extension and no matching magic bytes",
+            "processed_at": now,
+            "error_message": "Unrecognised file type — no extension and no matching magic bytes",
         })
         skipped_count += 1
         continue
@@ -642,63 +711,58 @@ print(f"Run complete: {success_count} succeeded, {error_count} errors, "
       f"{blocked_count} safety blocked, {skipped_count} skipped  ({total} candidates)")
 
 # COMMAND ----------
-
 # MAGIC %md ## 8. Write to Delta Tables
 
 # COMMAND ----------
 
-# DBTITLE 1,Write to Delta Tables
-from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType, TimestampType
-
-transcription_schema = StructType([
-    StructField("file_id", StringType(), True),
-    StructField("file_name", StringType(), True),
-    StructField("folder_path", StringType(), True),
-    StructField("surname", StringType(), True),
-    StructField("forename", StringType(), True),
-    StructField("year", StringType(), True),
-    StructField("doc_type", StringType(), True),
-    StructField("doc_type_detected", StringType(), True),
-    StructField("page_index", IntegerType(), True),
-    StructField("transcribed_text", StringType(), True),
-    StructField("personal_names", StringType(), True),
-    StructField("locations", StringType(), True),
-    StructField("uncertain_entries", StringType(), True),
-    StructField("confidence", StringType(), True),
-    StructField("confidence_notes", StringType(), True),
-    StructField("confidence_flag", BooleanType(), True),
-    StructField("gedcom_id", StringType(), True),
-    StructField("model_used", StringType(), True),
-    StructField("processed_at", TimestampType(), True),
+TRANSCRIPTION_SCHEMA = StructType([
+    StructField("file_id",           StringType(),    True),
+    StructField("file_name",         StringType(),    True),
+    StructField("folder_path",       StringType(),    True),
+    StructField("surname",           StringType(),    True),
+    StructField("forename",          StringType(),    True),
+    StructField("year",              StringType(),    True),
+    StructField("doc_type",          StringType(),    True),
+    StructField("doc_type_detected", StringType(),    True),
+    StructField("page_index",        IntegerType(),   True),
+    StructField("transcribed_text",  StringType(),    True),
+    StructField("personal_names",    StringType(),    True),
+    StructField("locations",         StringType(),    True),
+    StructField("uncertain_entries", StringType(),    True),
+    StructField("confidence",        StringType(),    True),
+    StructField("confidence_notes",  StringType(),    True),
+    StructField("confidence_flag",   BooleanType(),   True),
+    StructField("gedcom_id",         StringType(),    True),
+    StructField("model_used",        StringType(),    True),
+    StructField("processed_at",      TimestampType(), True),
 ])
 
-log_schema = StructType([
-    StructField("file_id", StringType(), True),
-    StructField("file_name", StringType(), True),
-    StructField("folder_path", StringType(), True),
-    StructField("status", StringType(), True),
-    StructField("page_count", IntegerType(), True),
-    StructField("model_used", StringType(), True),
-    StructField("processed_at", TimestampType(), True),
-    StructField("error_message", StringType(), True),
+LOG_SCHEMA = StructType([
+    StructField("file_id",       StringType(),    True),
+    StructField("file_name",     StringType(),    True),
+    StructField("folder_path",   StringType(),    True),
+    StructField("status",        StringType(),    True),
+    StructField("page_count",    IntegerType(),   True),
+    StructField("model_used",    StringType(),    True),
+    StructField("processed_at",  TimestampType(), True),
+    StructField("error_message", StringType(),    True),
 ])
 
 if transcription_rows:
-    transcription_df = spark.createDataFrame(transcription_rows, schema=transcription_schema)
+    transcription_df = spark.createDataFrame(transcription_rows, schema=TRANSCRIPTION_SCHEMA)
     transcription_df.write.format("delta").mode("append").saveAsTable(TRANSCRIPTIONS_TBL)
     print(f"Written {len(transcription_rows)} transcription rows to {TRANSCRIPTIONS_TBL}")
 else:
     print("No transcription rows to write.")
 
 if log_rows:
-    log_df = spark.createDataFrame(log_rows, schema=log_schema)
+    log_df = spark.createDataFrame(log_rows, schema=LOG_SCHEMA)
     log_df.write.format("delta").mode("append").saveAsTable(PROC_LOG_TBL)
     print(f"Written {len(log_rows)} log rows to {PROC_LOG_TBL}")
 else:
     print("No log rows to write.")
 
 # COMMAND ----------
-
 # MAGIC %md ## 9. Run Summary
 
 # COMMAND ----------
@@ -750,7 +814,6 @@ if errors:
         print(f"  {r['file_name']}: {r['error_message'][:150]}")
 
 # COMMAND ----------
-
 # MAGIC %md ## 10. Quick Validation Query
 
 # COMMAND ----------
