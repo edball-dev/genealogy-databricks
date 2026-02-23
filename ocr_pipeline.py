@@ -23,8 +23,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install google-cloud-aiplatform pypdf pdf2image --upgrade
-# MAGIC %pip install poppler-utils
+# MAGIC %pip install google-cloud-aiplatform --upgrade
 
 # COMMAND ----------
 
@@ -36,7 +35,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from io import BytesIO
 
-import pypdf
 import vertexai
 from vertexai.generative_models import GenerativeModel, Part
 from google.oauth2 import service_account
@@ -443,29 +441,25 @@ Return only the JSON block."""
 
 # COMMAND ----------
 
-def split_pdf_to_page_images(file_path: str) -> list[bytes]:
+def split_pdf_to_page_images(file_path: str) -> tuple[list[bytes], str]:
     """
-    Split a PDF into a list of JPEG image bytes, one per page, using pdf2image.
-    Falls back to sending the whole PDF as a single item if pdf2image is unavailable
-    or conversion fails (e.g. encrypted PDF).
+    Split a PDF into a list of JPEG image bytes using PyMuPDF (fitz).
+    No OS-level dependencies required — MuPDF is bundled in the PyMuPDF wheel.
+    Returns (list_of_page_bytes, mime_type).
     """
-    try:
-        from pdf2image import convert_from_path
-        images = convert_from_path(file_path, dpi=200, fmt="jpeg")
-        result = []
-        for img in images:
-            buf = BytesIO()
-            img.save(buf, format="JPEG")
-            result.append(buf.getvalue())
-        print(f"    PDF split into {len(result)} page image(s)")
-        return result, "image/jpeg"
-    except ImportError:
-        print("    pdf2image not available — sending PDF as single document")
-    except Exception as e:
-        print(f"    PDF split failed ({e}) — sending as single document")
-
-    with open(file_path, "rb") as f:
-        return [f.read()], "application/pdf"
+    import pymupdf  # imported here so the rest of the notebook works if install fails
+    
+    doc = pymupdf.open(file_path)
+    page_bytes = []
+    for page in doc:
+        # Render at 2x scale (144 DPI equivalent) for good OCR quality
+        mat = pymupdf.Matrix(2, 2)
+        pix = page.get_pixmap(matrix=mat)
+        page_bytes.append(pix.tobytes("jpeg"))
+    doc.close()
+    
+    print(f"    PDF split into {len(page_bytes)} page image(s) via PyMuPDF")
+    return page_bytes, "image/jpeg"
 
 
 def call_gemini(file_bytes: bytes, mime_type: str, prompt: str) -> dict:
