@@ -16,22 +16,27 @@
 # MAGIC       LLM doc type detection from controlled vocabulary; safety filter handling logged as
 # MAGIC       distinct status; confidence flag now triggers on medium and low (not just low);
 # MAGIC       gedcom_id column added ready for downstream person matching
-# MAGIC - v3: GIF support added; exponential backoff for 429 rate limit errors; robust JSON
-# MAGIC       extraction (outermost { } rather than fence stripping); improved prompt — explicit
-# MAGIC       JSON-only instruction, negative examples, output skeleton at end; PoorLawRecord
-# MAGIC       added to controlled vocabulary; explicit Spark schema on write (eliminates cast hacks)
+# MAGIC - v3: GIF support added; robust JSON extraction (outermost { } rather than fence
+# MAGIC       stripping); improved prompt — explicit JSON-only instruction, negative examples,
+# MAGIC       output skeleton at end; PoorLawRecord added to controlled vocabulary; explicit
+# MAGIC       Spark schema on write (eliminates cast hacks)
+# MAGIC - v3.1: Replace manual retry loop with tenacity wait_random_exponential(multiplier=1,
+# MAGIC         max=60) per Google's recommended approach for Vertex AI 429 errors; retry only
+# MAGIC         on 429/resource-exhausted, raise immediately on all other errors; up to 5 attempts
 
 # COMMAND ----------
 # MAGIC %md ## 1. Setup & Configuration
 
 # COMMAND ----------
-# MAGIC %pip install google-cloud-aiplatform pymupdf --upgrade
+# MAGIC %pip install google-cloud-aiplatform pymupdf tenacity --upgrade
 
 # COMMAND ----------
 
 import json
 import re
 import time
+
+from tenacity import retry, wait_random_exponential, stop_after_attempt, retry_if_exception
 import base64
 import traceback
 from datetime import datetime, timezone
@@ -69,8 +74,9 @@ SECRET_SCOPE       = "genealogy"
 SECRET_KEY         = "gcp_service_account_json"
 
 # --- Retry / rate limit ---
-MAX_RETRIES        = 3
-RETRY_DELAYS       = [10, 30, 90]       # Seconds between retries (exponential backoff)
+# Uses tenacity: random exponential backoff, waits up to 60s per attempt, max 5 attempts
+# Follows Google's recommended approach for Vertex AI 429 errors:
+# https://cloud.google.com/blog/products/ai-machine-learning/learn-how-to-handle-429-resource-exhaustion-errors-in-your-llms
 
 # --- Unity Catalog ---
 CATALOG            = "workspace"
@@ -511,65 +517,70 @@ def extract_json(text: str) -> str:
     return text  # Return as-is and let json.loads raise a clear error
 
 
+def _is_rate_limit_error(exc: Exception) -> bool:
+    """Return True if this exception is a 429 / resource exhaustion error."""
+    err = str(exc)
+    return "429" in err or "resource exhausted" in err.lower()
+
+
+def _call_gemini_once(file_bytes: bytes, mime_type: str, prompt: str) -> dict:
+    """
+    Single attempt to call Gemini. Separated from retry logic so tenacity
+    can wrap it cleanly without capturing non-retryable exceptions.
+    """
+    file_part = Part.from_data(data=file_bytes, mime_type=mime_type)
+
+    response = model.generate_content(
+        [file_part, prompt],
+        generation_config={"temperature": 0.1, "max_output_tokens": 8192},
+    )
+
+    # Detect safety block — candidates empty or content has no parts
+    if not response.candidates:
+        return {"_safety_blocked": True}
+    candidate = response.candidates[0]
+    if not candidate.content or not candidate.content.parts:
+        return {
+            "_safety_blocked": True,
+            "_finish_reason": str(getattr(candidate, "finish_reason", "unknown")),
+        }
+
+    raw_text = response.text.strip()
+    raw_text = extract_json(raw_text)
+
+    try:
+        return json.loads(raw_text)
+    except json.JSONDecodeError:
+        return {
+            "transcription":     raw_text,
+            "doc_type_detected": "Other",
+            "confidence":        "low",
+            "confidence_notes":  "Gemini response could not be parsed as JSON — raw text preserved.",
+            "personal_names":    [],
+            "locations":         [],
+            "uncertain_entries": [],
+        }
+
+
+@retry(
+    retry=retry_if_exception(_is_rate_limit_error),
+    wait=wait_random_exponential(multiplier=1, max=60),
+    stop=stop_after_attempt(5),
+    before_sleep=lambda rs: print(
+        f"    Rate limited (429) — attempt {rs.attempt_number} failed, "
+        f"retrying in {rs.next_action.sleep:.1f}s"
+    ),
+)
 def call_gemini_with_retry(file_bytes: bytes, mime_type: str, prompt: str) -> dict:
     """
-    Send file bytes to Gemini with exponential backoff on 429 rate limit errors.
-    Returns a parsed dict, or {"_safety_blocked": True} for safety filter blocks.
-    Raises on non-retryable errors after MAX_RETRIES attempts.
+    Call Gemini with tenacity exponential backoff on 429 rate limit errors.
+
+    Uses wait_random_exponential(multiplier=1, max=60) as recommended by Google:
+    waits a random duration up to 2^attempt seconds, capped at 60 seconds.
+    Jitter prevents retry storms when multiple files hit the limit simultaneously.
+    Non-429 errors are raised immediately without retry.
     """
-    last_error = None
-
-    for attempt in range(MAX_RETRIES):
-        try:
-            file_part = Part.from_data(data=file_bytes, mime_type=mime_type)
-
-            response = model.generate_content(
-                [file_part, prompt],
-                generation_config={"temperature": 0.1, "max_output_tokens": 8192},
-            )
-
-            # Detect safety block — candidates empty or content has no parts
-            if not response.candidates:
-                return {"_safety_blocked": True}
-            candidate = response.candidates[0]
-            if not candidate.content or not candidate.content.parts:
-                return {
-                    "_safety_blocked": True,
-                    "_finish_reason": str(getattr(candidate, "finish_reason", "unknown")),
-                }
-
-            raw_text = response.text.strip()
-
-            # Extract outermost JSON object — handles preambles and fences
-            raw_text = extract_json(raw_text)
-
-            try:
-                return json.loads(raw_text)
-            except json.JSONDecodeError:
-                # Gemini returned something unparseable — preserve raw text
-                return {
-                    "transcription":     raw_text,
-                    "doc_type_detected": "Other",
-                    "confidence":        "low",
-                    "confidence_notes":  "Gemini response could not be parsed as JSON — raw text preserved.",
-                    "personal_names":    [],
-                    "locations":         [],
-                    "uncertain_entries": [],
-                }
-
-        except Exception as e:
-            error_str = str(e)
-            if "429" in error_str or "Resource exhausted" in error_str:
-                if attempt < MAX_RETRIES - 1:
-                    delay = RETRY_DELAYS[attempt]
-                    print(f"    Rate limited (429) — waiting {delay}s before retry {attempt + 2}/{MAX_RETRIES}")
-                    time.sleep(delay)
-                    last_error = e
-                    continue
-            # Non-429 error or final attempt — re-raise
-            raise
-
-    raise last_error
+    return _call_gemini_once(file_bytes, mime_type, prompt)
 
 
 def ocr_file(file_path: str, metadata: dict) -> tuple:
