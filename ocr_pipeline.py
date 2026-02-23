@@ -30,9 +30,11 @@
 # MAGIC         write each file's results to Delta immediately (crash/cancel safe — no work lost)
 
 # COMMAND ----------
+
 # MAGIC %md ## 1. Setup & Configuration
 
 # COMMAND ----------
+
 # MAGIC %pip install google-cloud-aiplatform pymupdf tenacity --upgrade
 
 # COMMAND ----------
@@ -60,6 +62,7 @@ from pyspark.sql.types import (
 )
 
 # COMMAND ----------
+
 # MAGIC %md ### Parameters
 # MAGIC
 # MAGIC When running as a Databricks Job, set `folder_name` as a job parameter.
@@ -95,7 +98,7 @@ PROC_LOG_TBL       = f"{CATALOG}.{OUTPUT_SCHEMA}.ocr_processing_log"
 
 # --- Volume path ---
 VOLUME_BASE        = f"/Volumes/{CATALOG}/{STAGING_SCHEMA}/documents"
-FOLDER_PATH        = f"{VOLUME_BASE}/{FOLDER_NAME}"
+FOLDER_PATH        = f"{VOLUME_BASE}/Documents/{FOLDER_NAME}"
 
 # --- Controlled vocabulary for LLM doc type detection ---
 DOC_TYPE_VOCABULARY = [
@@ -121,6 +124,7 @@ print(f"Transcriptions    : {TRANSCRIPTIONS_TBL}")
 print(f"Processing log    : {PROC_LOG_TBL}")
 
 # COMMAND ----------
+
 # MAGIC %md ### Initialise Vertex AI
 
 # COMMAND ----------
@@ -141,6 +145,7 @@ model = GenerativeModel(VERTEX_MODEL)
 print(f"Vertex AI initialised. Model: {VERTEX_MODEL}")
 
 # COMMAND ----------
+
 # MAGIC %md ## 2. Create / Upgrade Delta Tables
 # MAGIC
 # MAGIC `CREATE TABLE IF NOT EXISTS` is idempotent — safe to rerun.
@@ -203,6 +208,7 @@ spark.sql(f"""
 print("Tables ready.")
 
 # COMMAND ----------
+
 # MAGIC %md ## 3. File Discovery
 
 # COMMAND ----------
@@ -264,7 +270,7 @@ source_df = spark.sql(f"""
         modified_at
     FROM {SOURCE_TABLE}
     WHERE _fivetran_deleted = false
-      AND _fivetran_file_path LIKE '{FOLDER_NAME}/%'
+      AND _fivetran_file_path LIKE 'Documents/{FOLDER_NAME}/%'
 """)
 
 # Exclude files already successfully processed (idempotency)
@@ -285,6 +291,7 @@ for row in to_process_df:
     print(f"  {row.file_path}  ({row.size:,} bytes)")
 
 # COMMAND ----------
+
 # MAGIC %md ## 4. Filename Parser
 
 # COMMAND ----------
@@ -417,6 +424,7 @@ def get_doc_type_context(doc_type: str) -> tuple:
     return ("historical document", "19th or early 20th century", "all visible text and fields")
 
 # COMMAND ----------
+
 # MAGIC %md ## 5. Prompt Builder
 
 # COMMAND ----------
@@ -485,6 +493,7 @@ Vocabulary for doc_type_detected:
 }}"""
 
 # COMMAND ----------
+
 # MAGIC %md ## 6. OCR Functions
 
 # COMMAND ----------
@@ -666,6 +675,7 @@ def ocr_file(file_path: str, metadata: dict) -> tuple:
     return rows, "success"
 
 # COMMAND ----------
+
 # MAGIC %md ## 7. Processing Loop
 
 # COMMAND ----------
@@ -818,6 +828,7 @@ print(f"Run complete: {success_count} succeeded, {error_count} errors, "
       f"{blocked_count} safety blocked, {skipped_count} skipped  ({total} candidates)")
 
 # COMMAND ----------
+
 # MAGIC %md ## 8. Confirm Writes
 
 # COMMAND ----------
@@ -832,6 +843,7 @@ spark.sql(f"""
 """).show()
 
 # COMMAND ----------
+
 # MAGIC %md ## 9. Run Summary
 
 # COMMAND ----------
@@ -875,6 +887,7 @@ if error_count:
     print(f"  SELECT file_name, error_message FROM {PROC_LOG_TBL} WHERE status = 'error' AND folder_path LIKE '%{FOLDER_NAME}%'")
 
 # COMMAND ----------
+
 # MAGIC %md ## 10. Quick Validation Query
 
 # COMMAND ----------
