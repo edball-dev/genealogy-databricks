@@ -23,6 +23,10 @@
 # MAGIC - v3.1: Replace manual retry loop with tenacity wait_random_exponential(multiplier=1,
 # MAGIC         max=60) per Google's recommended approach for Vertex AI 429 errors; retry only
 # MAGIC         on 429/resource-exhausted, raise immediately on all other errors; up to 5 attempts
+# MAGIC - v3.2: Increase max_output_tokens to 65536 (fixes truncated JSON on long documents);
+# MAGIC         add INTER_REQUEST_DELAY between files to prevent RPM exhaustion;
+# MAGIC         convert GIFs to JPEG via PyMuPDF before sending (fixes Gemini 400 BadRequest);
+# MAGIC         use retry_if_exception_type with SDK classes instead of string inspection
 
 # COMMAND ----------
 # MAGIC %md ## 1. Setup & Configuration
@@ -36,7 +40,8 @@ import json
 import re
 import time
 
-from tenacity import retry, wait_random_exponential, stop_after_attempt, retry_if_exception
+from tenacity import retry, wait_random_exponential, stop_after_attempt, retry_if_exception_type
+import google.api_core.exceptions
 import base64
 import traceback
 from datetime import datetime, timezone
@@ -77,6 +82,7 @@ SECRET_KEY         = "gcp_service_account_json"
 # Uses tenacity: random exponential backoff, waits up to 60s per attempt, max 5 attempts
 # Follows Google's recommended approach for Vertex AI 429 errors:
 # https://cloud.google.com/blog/products/ai-machine-learning/learn-how-to-handle-429-resource-exhaustion-errors-in-your-llms
+INTER_REQUEST_DELAY = 4   # Seconds to wait between files — keeps RPM well under quota
 
 # --- Unity Catalog ---
 CATALOG            = "workspace"
@@ -201,8 +207,8 @@ print("Tables ready.")
 # COMMAND ----------
 
 # Magic byte signatures → (mime_type, canonical_extension)
-# Covers extensionless files and GIFs (which have no entry in EXTENSION_MIME_MAP
-# because we detect them via magic bytes and Gemini accepts image/gif natively)
+# GIFs are detected but then converted to JPEG before sending to Gemini —
+# image/gif support is inconsistent across Gemini model versions (can return 400).
 MAGIC_SIGNATURES = [
     (b'\xff\xd8\xff',         "image/jpeg",       ".jpg"),
     (b'\x89PNG\r\n\x1a\n',    "image/png",        ".png"),
@@ -517,12 +523,6 @@ def extract_json(text: str) -> str:
     return text  # Return as-is and let json.loads raise a clear error
 
 
-def _is_rate_limit_error(exc: Exception) -> bool:
-    """Return True if this exception is a 429 / resource exhaustion error."""
-    err = str(exc)
-    return "429" in err or "resource exhausted" in err.lower()
-
-
 def _call_gemini_once(file_bytes: bytes, mime_type: str, prompt: str) -> dict:
     """
     Single attempt to call Gemini. Separated from retry logic so tenacity
@@ -532,7 +532,7 @@ def _call_gemini_once(file_bytes: bytes, mime_type: str, prompt: str) -> dict:
 
     response = model.generate_content(
         [file_part, prompt],
-        generation_config={"temperature": 0.1, "max_output_tokens": 8192},
+        generation_config={"temperature": 0.1, "max_output_tokens": 65536},
     )
 
     # Detect safety block — candidates empty or content has no parts
@@ -563,7 +563,13 @@ def _call_gemini_once(file_bytes: bytes, mime_type: str, prompt: str) -> dict:
 
 
 @retry(
-    retry=retry_if_exception(_is_rate_limit_error),
+    # Retry specifically on Vertex AI quota/rate-limit exceptions.
+    # ResourceExhausted = gRPC quota exhaustion; TooManyRequests = HTTP 429.
+    # Using the SDK exception classes directly is more reliable than string inspection.
+    retry=retry_if_exception_type((
+        google.api_core.exceptions.ResourceExhausted,
+        google.api_core.exceptions.TooManyRequests,
+    )),
     wait=wait_random_exponential(multiplier=1, max=60),
     stop=stop_after_attempt(5),
     before_sleep=lambda rs: print(
@@ -583,12 +589,28 @@ def call_gemini_with_retry(file_bytes: bytes, mime_type: str, prompt: str) -> di
     return _call_gemini_once(file_bytes, mime_type, prompt)
 
 
+def convert_gif_to_jpeg(file_path: str) -> bytes:
+    """
+    Convert a GIF to JPEG bytes using PyMuPDF.
+    Gemini nominally supports image/gif but returns 400 BadRequest on some model
+    versions. Converting to JPEG is more reliable.
+    """
+    import pymupdf
+    doc = pymupdf.open(file_path)
+    page = doc[0]
+    mat = pymupdf.Matrix(2, 2)
+    pix = page.get_pixmap(matrix=mat)
+    doc.close()
+    return pix.tobytes("jpeg")
+
+
 def ocr_file(file_path: str, metadata: dict) -> tuple:
     """
     Run OCR on a single file.
     Returns (list_of_row_dicts, status_string).
     - Images produce one row.
     - PDFs are split into pages — one row per page.
+    - GIFs are converted to JPEG before sending (avoids Gemini 400 BadRequest).
     - Safety blocks return ([], "safety_blocked").
     """
     type_info = get_mime_type(file_path)
@@ -601,6 +623,10 @@ def ocr_file(file_path: str, metadata: dict) -> tuple:
 
     if mime_type == "application/pdf":
         pages_bytes, page_mime = split_pdf_to_page_images(file_path)
+    elif mime_type == "image/gif":
+        print(f"    Converting GIF to JPEG for Gemini compatibility")
+        pages_bytes = [convert_gif_to_jpeg(file_path)]
+        page_mime = "image/jpeg"
     else:
         with open(file_path, "rb") as f:
             pages_bytes = [f.read()]
@@ -716,6 +742,13 @@ for i, file_row in enumerate(to_process_df, 1):
             "processed_at": now, "error_message": error_msg[:2000],
         })
         error_count += 1
+
+    # Pace requests to stay within Vertex AI RPM quota.
+    # Placed at end of loop body so it runs after every file (success, error,
+    # or safety_blocked). Skipped files use 'continue' above so don't reach here,
+    # but their API cost is zero so the omission is fine.
+    if i < total:
+        time.sleep(INTER_REQUEST_DELAY)
 
 print(f"\n{'='*50}")
 print(f"Run complete: {success_count} succeeded, {error_count} errors, "
