@@ -18,10 +18,13 @@
 # MAGIC       gedcom_id column added ready for downstream person matching
 
 # COMMAND ----------
+
 # MAGIC %md ## 1. Setup & Configuration
 
 # COMMAND ----------
+
 # MAGIC %pip install google-cloud-aiplatform pypdf pdf2image --upgrade
+# MAGIC %pip install poppler-utils
 
 # COMMAND ----------
 
@@ -42,6 +45,7 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import IntegerType
 
 # COMMAND ----------
+
 # MAGIC %md ### Parameters
 # MAGIC
 # MAGIC When running as a Databricks Job, set `folder_name` as a job parameter.
@@ -55,9 +59,9 @@ FOLDER_NAME = dbutils.widgets.get("folder_name")
 # COMMAND ----------
 
 # --- Core configuration ---
-GCP_PROJECT        = "YOUR_GCP_PROJECT_ID"   # Replace with your GCP project ID
+GCP_PROJECT        = "genealogy-488213"   # Replace with your GCP project ID
 GCP_LOCATION       = "global"                # Latest Gemini models require global endpoint
-VERTEX_MODEL       = "gemini-2.5-pro-preview-03-25"
+VERTEX_MODEL       = "gemini-3-pro-preview"
 SECRET_SCOPE       = "genealogy"
 SECRET_KEY         = "gcp_service_account_json"
 
@@ -96,6 +100,7 @@ print(f"Transcriptions    : {TRANSCRIPTIONS_TBL}")
 print(f"Processing log    : {PROC_LOG_TBL}")
 
 # COMMAND ----------
+
 # MAGIC %md ### Initialise Vertex AI
 
 # COMMAND ----------
@@ -116,6 +121,7 @@ model = GenerativeModel(VERTEX_MODEL)
 print(f"Vertex AI initialised. Model: {VERTEX_MODEL}")
 
 # COMMAND ----------
+
 # MAGIC %md ## 2. Create / Upgrade Delta Tables
 # MAGIC
 # MAGIC `CREATE TABLE IF NOT EXISTS` is idempotent — safe to rerun.
@@ -180,6 +186,7 @@ spark.sql(f"""
 print("Tables ready.")
 
 # COMMAND ----------
+
 # MAGIC %md ## 3. File Discovery
 
 # COMMAND ----------
@@ -258,6 +265,7 @@ for row in to_process_df:
     print(f"  {row.file_path}  ({row.size:,} bytes)")
 
 # COMMAND ----------
+
 # MAGIC %md ## 4. Filename Parser
 
 # COMMAND ----------
@@ -374,6 +382,7 @@ def get_doc_type_context(doc_type: str) -> tuple:
     return ("historical document", "19th or early 20th century", "all visible text and fields")
 
 # COMMAND ----------
+
 # MAGIC %md ## 5. Prompt Builder
 
 # COMMAND ----------
@@ -429,6 +438,7 @@ Return a single JSON block with no additional commentary before or after it, usi
 Return only the JSON block."""
 
 # COMMAND ----------
+
 # MAGIC %md ## 6. OCR Functions
 
 # COMMAND ----------
@@ -555,6 +565,7 @@ def ocr_file(file_path: str, metadata: dict) -> tuple:
     return rows, "success"
 
 # COMMAND ----------
+
 # MAGIC %md ## 7. Processing Loop
 
 # COMMAND ----------
@@ -637,27 +648,63 @@ print(f"Run complete: {success_count} succeeded, {error_count} errors, "
       f"{blocked_count} safety blocked, {skipped_count} skipped  ({total} candidates)")
 
 # COMMAND ----------
+
 # MAGIC %md ## 8. Write to Delta Tables
 
 # COMMAND ----------
 
+# DBTITLE 1,Write to Delta Tables
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType, TimestampType
+
+transcription_schema = StructType([
+    StructField("file_id", StringType(), True),
+    StructField("file_name", StringType(), True),
+    StructField("folder_path", StringType(), True),
+    StructField("surname", StringType(), True),
+    StructField("forename", StringType(), True),
+    StructField("year", StringType(), True),
+    StructField("doc_type", StringType(), True),
+    StructField("doc_type_detected", StringType(), True),
+    StructField("page_index", IntegerType(), True),
+    StructField("transcribed_text", StringType(), True),
+    StructField("personal_names", StringType(), True),
+    StructField("locations", StringType(), True),
+    StructField("uncertain_entries", StringType(), True),
+    StructField("confidence", StringType(), True),
+    StructField("confidence_notes", StringType(), True),
+    StructField("confidence_flag", BooleanType(), True),
+    StructField("gedcom_id", StringType(), True),
+    StructField("model_used", StringType(), True),
+    StructField("processed_at", TimestampType(), True),
+])
+
+log_schema = StructType([
+    StructField("file_id", StringType(), True),
+    StructField("file_name", StringType(), True),
+    StructField("folder_path", StringType(), True),
+    StructField("status", StringType(), True),
+    StructField("page_count", IntegerType(), True),
+    StructField("model_used", StringType(), True),
+    StructField("processed_at", TimestampType(), True),
+    StructField("error_message", StringType(), True),
+])
+
 if transcription_rows:
-    transcription_df = spark.createDataFrame(transcription_rows)
-    transcription_df = transcription_df.withColumn("page_index", F.col("page_index").cast(IntegerType()))
+    transcription_df = spark.createDataFrame(transcription_rows, schema=transcription_schema)
     transcription_df.write.format("delta").mode("append").saveAsTable(TRANSCRIPTIONS_TBL)
     print(f"Written {len(transcription_rows)} transcription rows to {TRANSCRIPTIONS_TBL}")
 else:
     print("No transcription rows to write.")
 
 if log_rows:
-    log_df = spark.createDataFrame(log_rows)
-    log_df = log_df.withColumn("page_count", F.col("page_count").cast(IntegerType()))
+    log_df = spark.createDataFrame(log_rows, schema=log_schema)
     log_df.write.format("delta").mode("append").saveAsTable(PROC_LOG_TBL)
     print(f"Written {len(log_rows)} log rows to {PROC_LOG_TBL}")
 else:
     print("No log rows to write.")
 
 # COMMAND ----------
+
 # MAGIC %md ## 9. Run Summary
 
 # COMMAND ----------
@@ -709,6 +756,7 @@ if errors:
         print(f"  {r['file_name']}: {r['error_message'][:150]}")
 
 # COMMAND ----------
+
 # MAGIC %md ## 10. Quick Validation Query
 
 # COMMAND ----------
