@@ -26,7 +26,8 @@
 # MAGIC - v3.2: Increase max_output_tokens to 65536 (fixes truncated JSON on long documents);
 # MAGIC         add INTER_REQUEST_DELAY between files to prevent RPM exhaustion;
 # MAGIC         convert GIFs to JPEG via PyMuPDF before sending (fixes Gemini 400 BadRequest);
-# MAGIC         use retry_if_exception_type with SDK classes instead of string inspection
+# MAGIC         use retry_if_exception_type with SDK classes instead of string inspection;
+# MAGIC         write each file's results to Delta immediately (crash/cancel safe — no work lost)
 
 # COMMAND ----------
 # MAGIC %md ## 1. Setup & Configuration
@@ -669,8 +670,61 @@ def ocr_file(file_path: str, metadata: dict) -> tuple:
 
 # COMMAND ----------
 
-transcription_rows = []
-log_rows = []
+TRANSCRIPTION_SCHEMA = StructType([
+    StructField("file_id",           StringType(),    True),
+    StructField("file_name",         StringType(),    True),
+    StructField("folder_path",       StringType(),    True),
+    StructField("surname",           StringType(),    True),
+    StructField("forename",          StringType(),    True),
+    StructField("year",              StringType(),    True),
+    StructField("doc_type",          StringType(),    True),
+    StructField("doc_type_detected", StringType(),    True),
+    StructField("page_index",        IntegerType(),   True),
+    StructField("transcribed_text",  StringType(),    True),
+    StructField("personal_names",    StringType(),    True),
+    StructField("locations",         StringType(),    True),
+    StructField("uncertain_entries", StringType(),    True),
+    StructField("confidence",        StringType(),    True),
+    StructField("confidence_notes",  StringType(),    True),
+    StructField("confidence_flag",   BooleanType(),   True),
+    StructField("gedcom_id",         StringType(),    True),
+    StructField("model_used",        StringType(),    True),
+    StructField("processed_at",      TimestampType(), True),
+])
+
+LOG_SCHEMA = StructType([
+    StructField("file_id",       StringType(),    True),
+    StructField("file_name",     StringType(),    True),
+    StructField("folder_path",   StringType(),    True),
+    StructField("status",        StringType(),    True),
+    StructField("page_count",    IntegerType(),   True),
+    StructField("model_used",    StringType(),    True),
+    StructField("processed_at",  TimestampType(), True),
+    StructField("error_message", StringType(),    True),
+])
+
+# Write results immediately after each file so that a cancelled or failed
+# run does not lose work already completed. The idempotency check at the top
+# of the loop (left_anti join on the log table) ensures files already logged
+# as success are not reprocessed on the next run.
+
+def write_transcription_rows(rows: list):
+    """Write a list of transcription row dicts to Delta immediately."""
+    if not rows:
+        return
+    df = spark.createDataFrame(rows, schema=TRANSCRIPTION_SCHEMA)
+    df.write.format("delta").mode("append").saveAsTable(TRANSCRIPTIONS_TBL)
+
+
+def write_log_row(row: dict):
+    """Write a single processing log row dict to Delta immediately."""
+    df = spark.createDataFrame([row], schema=LOG_SCHEMA)
+    df.write.format("delta").mode("append").saveAsTable(PROC_LOG_TBL)
+
+
+# Keep summary-only accumulators for the end-of-run report.
+# Individual rows are no longer held in memory.
+all_rows_summary = []   # lightweight dicts: file_name, page_index, confidence, confidence_flag, confidence_notes
 
 total         = len(to_process_df)
 success_count = 0
@@ -711,7 +765,7 @@ for i, file_row in enumerate(to_process_df, 1):
 
         if status == "safety_blocked":
             print(f"  ✗ Blocked by Gemini safety filters")
-            log_rows.append({
+            write_log_row({
                 "file_id": file_id, "file_name": file_name, "folder_path": FOLDER_PATH,
                 "status": "safety_blocked", "page_count": 0, "model_used": VERTEX_MODEL,
                 "processed_at": now,
@@ -720,8 +774,10 @@ for i, file_row in enumerate(to_process_df, 1):
             blocked_count += 1
             continue
 
-        transcription_rows.extend(rows)
-        log_rows.append({
+        # Write transcription rows and log entry to Delta immediately —
+        # results are safe even if the run is cancelled after this point.
+        write_transcription_rows(rows)
+        write_log_row({
             "file_id": file_id, "file_name": file_name, "folder_path": FOLDER_PATH,
             "status": "success", "page_count": len(rows), "model_used": VERTEX_MODEL,
             "processed_at": now, "error_message": None,
@@ -731,12 +787,19 @@ for i, file_row in enumerate(to_process_df, 1):
         confidence = rows[0]["confidence"] if rows else "unknown"
         print(f"  ✓ Done  pages={len(rows)}  confidence={confidence}"
               + ("  ⚑ review flagged" if flagged else ""))
+        # Accumulate lightweight summary for end-of-run report
+        all_rows_summary.extend([
+            {"file_name": r["file_name"], "page_index": r["page_index"],
+             "confidence": r["confidence"], "confidence_flag": r["confidence_flag"],
+             "confidence_notes": r["confidence_notes"]}
+            for r in rows
+        ])
         success_count += 1
 
     except Exception as e:
         error_msg = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
         print(f"  ✗ Error: {error_msg[:200]}")
-        log_rows.append({
+        write_log_row({
             "file_id": file_id, "file_name": file_name, "folder_path": FOLDER_PATH,
             "status": "error", "page_count": 0, "model_used": VERTEX_MODEL,
             "processed_at": now, "error_message": error_msg[:2000],
@@ -755,56 +818,18 @@ print(f"Run complete: {success_count} succeeded, {error_count} errors, "
       f"{blocked_count} safety blocked, {skipped_count} skipped  ({total} candidates)")
 
 # COMMAND ----------
-# MAGIC %md ## 8. Write to Delta Tables
+# MAGIC %md ## 8. Confirm Writes
 
 # COMMAND ----------
 
-TRANSCRIPTION_SCHEMA = StructType([
-    StructField("file_id",           StringType(),    True),
-    StructField("file_name",         StringType(),    True),
-    StructField("folder_path",       StringType(),    True),
-    StructField("surname",           StringType(),    True),
-    StructField("forename",          StringType(),    True),
-    StructField("year",              StringType(),    True),
-    StructField("doc_type",          StringType(),    True),
-    StructField("doc_type_detected", StringType(),    True),
-    StructField("page_index",        IntegerType(),   True),
-    StructField("transcribed_text",  StringType(),    True),
-    StructField("personal_names",    StringType(),    True),
-    StructField("locations",         StringType(),    True),
-    StructField("uncertain_entries", StringType(),    True),
-    StructField("confidence",        StringType(),    True),
-    StructField("confidence_notes",  StringType(),    True),
-    StructField("confidence_flag",   BooleanType(),   True),
-    StructField("gedcom_id",         StringType(),    True),
-    StructField("model_used",        StringType(),    True),
-    StructField("processed_at",      TimestampType(), True),
-])
-
-LOG_SCHEMA = StructType([
-    StructField("file_id",       StringType(),    True),
-    StructField("file_name",     StringType(),    True),
-    StructField("folder_path",   StringType(),    True),
-    StructField("status",        StringType(),    True),
-    StructField("page_count",    IntegerType(),   True),
-    StructField("model_used",    StringType(),    True),
-    StructField("processed_at",  TimestampType(), True),
-    StructField("error_message", StringType(),    True),
-])
-
-if transcription_rows:
-    transcription_df = spark.createDataFrame(transcription_rows, schema=TRANSCRIPTION_SCHEMA)
-    transcription_df.write.format("delta").mode("append").saveAsTable(TRANSCRIPTIONS_TBL)
-    print(f"Written {len(transcription_rows)} transcription rows to {TRANSCRIPTIONS_TBL}")
-else:
-    print("No transcription rows to write.")
-
-if log_rows:
-    log_df = spark.createDataFrame(log_rows, schema=LOG_SCHEMA)
-    log_df.write.format("delta").mode("append").saveAsTable(PROC_LOG_TBL)
-    print(f"Written {len(log_rows)} log rows to {PROC_LOG_TBL}")
-else:
-    print("No log rows to write.")
+# Rows are written to Delta immediately after each file in the processing loop.
+# This cell just confirms the current state of both tables for this folder.
+spark.sql(f"""
+    SELECT status, COUNT(*) AS files, SUM(page_count) AS pages
+    FROM {PROC_LOG_TBL}
+    WHERE folder_path LIKE '%{FOLDER_NAME}%'
+    GROUP BY status ORDER BY status
+""").show()
 
 # COMMAND ----------
 # MAGIC %md ## 9. Run Summary
@@ -823,39 +848,31 @@ print(f"Safety blocked    : {blocked_count}")
 print(f"Skipped           : {skipped_count}")
 print()
 
-if transcription_rows:
-    confidence_counts = Counter(r["confidence"] for r in transcription_rows)
-    print("Confidence breakdown (rows):")
+if all_rows_summary:
+    confidence_counts = Counter(r["confidence"] for r in all_rows_summary)
+    print("Confidence breakdown (rows written this run):")
     for level in ["high", "medium", "low"]:
         print(f"  {level:8s}: {confidence_counts.get(level, 0)}")
     print()
 
-    doc_type_counts = Counter(r["doc_type_detected"] for r in transcription_rows)
-    print("Document types detected by Gemini:")
-    for dt, count in doc_type_counts.most_common():
-        print(f"  {dt:30s}: {count}")
-    print()
-
-needs_review = [r for r in transcription_rows if r["confidence_flag"]]
+needs_review = [r for r in all_rows_summary if r["confidence_flag"]]
 if needs_review:
     print(f"Rows flagged for review ({len(needs_review)}):")
     for r in needs_review:
         print(f"  {r['file_name']} p{r['page_index']}  [{r['confidence']}]  {r['confidence_notes'][:100]}")
 else:
     print("No rows flagged for review.")
+print()
+print("Note: doc_type breakdown available via the validation query in Section 10.")
 
 if blocked_count:
-    blocked_files = [r["file_name"] for r in log_rows if r["status"] == "safety_blocked"]
-    print(f"\nSafety blocked ({blocked_count}):")
-    for f in blocked_files:
-        print(f"  {f}")
+    print(f"\nSafety blocked ({blocked_count}) — check log table for filenames:")
+    print(f"  SELECT file_name FROM {PROC_LOG_TBL} WHERE status = 'safety_blocked' AND folder_path LIKE '%{FOLDER_NAME}%'")
     print("  Tip: convert PDF to JPEG pages and reprocess")
 
-errors = [r for r in log_rows if r["status"] == "error"]
-if errors:
-    print(f"\nErrors ({len(errors)}):")
-    for r in errors:
-        print(f"  {r['file_name']}: {r['error_message'][:150]}")
+if error_count:
+    print(f"\nErrors ({error_count}) — check log table for details:")
+    print(f"  SELECT file_name, error_message FROM {PROC_LOG_TBL} WHERE status = 'error' AND folder_path LIKE '%{FOLDER_NAME}%'")
 
 # COMMAND ----------
 # MAGIC %md ## 10. Quick Validation Query
