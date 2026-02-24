@@ -680,6 +680,9 @@ def ocr_file(file_path: str, metadata: dict) -> tuple:
 
 # COMMAND ----------
 
+transcription_rows = []
+log_rows = []
+
 TRANSCRIPTION_SCHEMA = StructType([
     StructField("file_id",           StringType(),    True),
     StructField("file_name",         StringType(),    True),
