@@ -28,6 +28,10 @@
 # MAGIC         convert GIFs to JPEG via PyMuPDF before sending (fixes Gemini 400 BadRequest);
 # MAGIC         use retry_if_exception_type with SDK classes instead of string inspection;
 # MAGIC         write each file's results to Delta immediately (crash/cancel safe — no work lost)
+# MAGIC - v3.3: Migrate from deprecated vertexai.generative_models SDK to google-genai SDK.
+# MAGIC         vertexai.generative_models is deprecated as of June 2025, removed June 2026.
+# MAGIC         New pattern: google-genai client (client.models.generate_content) with
+# MAGIC         types.GenerateContentConfig and types.Part.from_bytes for image data.
 
 # COMMAND ----------
 
@@ -35,7 +39,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install google-cloud-aiplatform pymupdf tenacity --upgrade
+# MAGIC %pip install google-genai pymupdf tenacity --upgrade
 
 # COMMAND ----------
 
@@ -51,8 +55,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from io import BytesIO
 
-import vertexai
-from vertexai.generative_models import GenerativeModel, Part
+from google import genai
+from google.genai import types
 from google.oauth2 import service_account
 
 from pyspark.sql import functions as F
@@ -139,10 +143,15 @@ credentials = service_account.Credentials.from_service_account_info(
     scopes=["https://www.googleapis.com/auth/cloud-platform"]
 )
 
-vertexai.init(project=GCP_PROJECT, location=GCP_LOCATION, credentials=credentials)
-model = GenerativeModel(VERTEX_MODEL)
+# google-genai client replaces deprecated vertexai.generative_models (removed June 2026)
+client = genai.Client(
+    vertexai=True,
+    project=GCP_PROJECT,
+    location=GCP_LOCATION,
+    credentials=credentials,
+)
 
-print(f"Vertex AI initialised. Model: {VERTEX_MODEL}")
+print(f"google-genai client initialised. Model: {VERTEX_MODEL}")
 
 # COMMAND ----------
 
@@ -537,12 +546,17 @@ def _call_gemini_once(file_bytes: bytes, mime_type: str, prompt: str) -> dict:
     """
     Single attempt to call Gemini. Separated from retry logic so tenacity
     can wrap it cleanly without capturing non-retryable exceptions.
+    Uses google-genai SDK (replaces deprecated vertexai.generative_models).
     """
-    file_part = Part.from_data(data=file_bytes, mime_type=mime_type)
+    image_part = types.Part.from_bytes(data=file_bytes, mime_type=mime_type)
 
-    response = model.generate_content(
-        [file_part, prompt],
-        generation_config={"temperature": 0.1, "max_output_tokens": 65536},
+    response = client.models.generate_content(
+        model=VERTEX_MODEL,
+        contents=[image_part, prompt],
+        config=types.GenerateContentConfig(
+            temperature=0.1,
+            max_output_tokens=65536,
+        ),
     )
 
     # Detect safety block — candidates empty or content has no parts
