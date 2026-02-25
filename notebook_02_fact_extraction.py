@@ -143,7 +143,7 @@ INSTRUCTIONS:
    - death_place: place of death
    - marriage_year: year of marriage
    - marriage_place: place of marriage
-   - occupation: occupation or trade as written
+   - occupation: occupation or trade as written — do NOT extract military ranks (e.g. Pte, Cpl, Sgt, Lt) as occupations; these are ranks, not trades
    - forename: forename as written (may differ from filename)
    - surname: surname as written (may differ from filename)
    - residence_place: address or place of residence at time of document
