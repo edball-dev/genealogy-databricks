@@ -43,7 +43,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install google-genai pymupdf tenacity --upgrade
+# MAGIC %pip install "google-genai==1.64.0" "pydantic<2.12" pymupdf tenacity
 
 # COMMAND ----------
 
@@ -218,6 +218,22 @@ spark.sql(f"""
     )
     USING DELTA
     COMMENT 'Processing log — one row per file, used for idempotency'
+""")
+
+spark.sql(f"""
+    CREATE TABLE IF NOT EXISTS {TOKEN_USAGE_TBL} (
+        logged_at      TIMESTAMP COMMENT 'When this row was written',
+        file_id        STRING    COMMENT 'Google Drive file ID',
+        file_name      STRING    COMMENT 'Original filename',
+        model_used     STRING    COMMENT 'Vertex AI model used',
+        page_count     INT       COMMENT 'Number of pages processed',
+        prompt_tokens  INT       COMMENT 'Input tokens charged by Gemini',
+        output_tokens  INT       COMMENT 'Output tokens charged by Gemini',
+        total_tokens   INT       COMMENT 'Total tokens charged by Gemini',
+        thinking_tokens INT      COMMENT 'Thinking tokens charged by Gemini (billed as output)'
+    )
+    USING DELTA
+    COMMENT 'Gemini token usage log — one row per file processed'
 """)
 
 print("Tables ready.")
@@ -564,6 +580,8 @@ def _call_gemini_once(file_bytes: bytes, mime_type: str, prompt: str) -> tuple:
         config=types.GenerateContentConfig(
             temperature=0.1,
             max_output_tokens=65536,
+            thinking_config=types.ThinkingConfig(thinking_level="LOW"), # reduce Gemini 3 thinking to keep token use dow, but keep an eye on quality
+            http_options=types.HttpOptions(timeout=120000),  # 2 minutes in milliseconds
         ),
     )
 
@@ -572,6 +590,7 @@ def _call_gemini_once(file_bytes: bytes, mime_type: str, prompt: str) -> tuple:
     usage = {
         "prompt_tokens":  getattr(um, "prompt_token_count",     0) or 0,
         "output_tokens":  getattr(um, "candidates_token_count", 0) or 0,
+        "thinking_tokens": getattr(um, "thoughts_token_count",    0) or 0,
         "total_tokens":   getattr(um, "total_token_count",      0) or 0,
     }
 
@@ -607,15 +626,16 @@ def _call_gemini_once(file_bytes: bytes, mime_type: str, prompt: str) -> tuple:
     # ResourceExhausted = gRPC quota exhaustion; TooManyRequests = HTTP 429.
     # Using the SDK exception classes directly is more reliable than string inspection.
     retry=retry_if_exception_type((
-        google.api_core.exceptions.ResourceExhausted,
+        google.api_core.exceptions.ResourceExhausted,  # 429
         google.api_core.exceptions.TooManyRequests,
+        google.api_core.exceptions.DeadlineExceeded,   # 504
+        google.api_core.exceptions.Cancelled,          # 499
     )),
     wait=wait_random_exponential(multiplier=1, max=60),
     stop=stop_after_attempt(5),
-    before_sleep=lambda rs: print(
-        f"    Rate limited (429) — attempt {rs.attempt_number} failed, "
-        f"retrying in {rs.next_action.sleep:.1f}s"
-    ),
+        before_sleep=lambda rs: print(
+            f"    Rate limited (429) — attempt {rs.attempt_number} failed, retrying..."
+        ),
 )
 def call_gemini_with_retry(file_bytes: bytes, mime_type: str, prompt: str) -> tuple:
     """
@@ -666,8 +686,9 @@ def ocr_file(file_path: str, metadata: dict) -> tuple:
         pages_bytes, page_mime = split_pdf_to_page_images(file_path)
     elif mime_type == "image/gif":
         print(f"    Converting GIF to JPEG for Gemini compatibility")
-        pages_bytes = [convert_gif_to_jpeg(file_path)]
-        page_mime = "image/jpeg"
+        print(f"    Commented out GIF conversion as it seems to hang")
+        # pages_bytes = [convert_gif_to_jpeg(file_path)]
+        # page_mime = "image/jpeg"
     else:
         with open(file_path, "rb") as f:
             pages_bytes = [f.read()]
@@ -676,6 +697,7 @@ def ocr_file(file_path: str, metadata: dict) -> tuple:
     rows = []
     file_prompt_tokens  = 0
     file_output_tokens  = 0
+    file_thinking_tokens  = 0
     file_total_tokens   = 0
 
     for page_index, page_bytes in enumerate(pages_bytes, 1):
@@ -683,10 +705,11 @@ def ocr_file(file_path: str, metadata: dict) -> tuple:
 
         file_prompt_tokens  += usage["prompt_tokens"]
         file_output_tokens  += usage["output_tokens"]
+        file_thinking_tokens  += usage["thinking_tokens"]
         file_total_tokens   += usage["total_tokens"]
 
         if result.get("_safety_blocked"):
-            return [], "safety_blocked", file_prompt_tokens, file_output_tokens, file_total_tokens
+            return [], "safety_blocked", file_prompt_tokens, file_output_tokens, file_thinking_tokens, file_total_tokens
 
         rows.append({
             "file_id":           metadata["file_id"],
@@ -711,7 +734,7 @@ def ocr_file(file_path: str, metadata: dict) -> tuple:
             "processed_at":      now,
         })
 
-    return rows, "success", file_prompt_tokens, file_output_tokens, file_total_tokens
+    return rows, "success", file_prompt_tokens, file_output_tokens, file_thinking_tokens, file_total_tokens
 
 # COMMAND ----------
 
@@ -782,12 +805,13 @@ TOKEN_USAGE_SCHEMA = StructType([
     StructField("page_count",     IntegerType(),   True),
     StructField("prompt_tokens",  IntegerType(),   True),
     StructField("output_tokens",  IntegerType(),   True),
+    StructField("thinking_tokens",  IntegerType(),   True),
     StructField("total_tokens",   IntegerType(),   True),
 ])
 
 
 def _write_token_usage(file_id: str, file_name: str, page_count: int,
-                       prompt_tokens: int, output_tokens: int,
+                       prompt_tokens: int, output_tokens: int, thinking_tokens: int,
                        total_tokens: int, logged_at):
     """
     Write token usage for one file to the usage log table.
@@ -802,6 +826,7 @@ def _write_token_usage(file_id: str, file_name: str, page_count: int,
             "page_count":    page_count,
             "prompt_tokens": prompt_tokens,
             "output_tokens": output_tokens,
+            "thinking_tokens": thinking_tokens,
             "total_tokens":  total_tokens,
         }], schema=TOKEN_USAGE_SCHEMA)
         df.write.format("delta").mode("append").saveAsTable(TOKEN_USAGE_TBL)
@@ -848,7 +873,7 @@ for i, file_row in enumerate(to_process_df, 1):
         print(f"  ⚠ Filename did not parse cleanly — using generic prompt")
 
     try:
-        rows, status, prompt_tokens, output_tokens, total_tokens = ocr_file(file_path, metadata)
+        rows, status, prompt_tokens, output_tokens, thinking_tokens, total_tokens = ocr_file(file_path, metadata)
 
         if status == "safety_blocked":
             print(f"  ✗ Blocked by Gemini safety filters")
@@ -858,7 +883,7 @@ for i, file_row in enumerate(to_process_df, 1):
                 "processed_at": now,
                 "error_message": "Response blocked by Gemini safety filters. Try converting to image and reprocessing.",
             })
-            _write_token_usage(file_id, file_name, 0, prompt_tokens, output_tokens, total_tokens, now)
+            _write_token_usage(file_id, file_name, 0, prompt_tokens, output_tokens, thinking_tokens, total_tokens, now)
             blocked_count += 1
             continue
 
@@ -870,7 +895,7 @@ for i, file_row in enumerate(to_process_df, 1):
             "status": "success", "page_count": len(rows), "model_used": VERTEX_MODEL,
             "processed_at": now, "error_message": None,
         })
-        _write_token_usage(file_id, file_name, len(rows), prompt_tokens, output_tokens, total_tokens, now)
+        _write_token_usage(file_id, file_name, len(rows), prompt_tokens, output_tokens, thinking_tokens, total_tokens, now)
 
         flagged    = any(r["confidence_flag"] for r in rows)
         confidence = rows[0]["confidence"] if rows else "unknown"
@@ -912,6 +937,7 @@ try:
         SELECT
             SUM(prompt_tokens)  AS prompt_tokens,
             SUM(output_tokens)  AS output_tokens,
+            SUM(thinking_tokens)  AS thinking_tokens,
             SUM(total_tokens)   AS total_tokens,
             COUNT(*)            AS files_logged
         FROM {TOKEN_USAGE_TBL}
@@ -924,6 +950,7 @@ try:
     print(f"\nToken usage (this folder, all-time):")
     print(f"  Prompt tokens : {usage_summary.prompt_tokens:,}")
     print(f"  Output tokens : {usage_summary.output_tokens:,}")
+    print(f"  Thinking tokens : {usage_summary.thinking_tokens:,}")
     print(f"  Total tokens  : {usage_summary.total_tokens:,}")
 except Exception as e:
     print(f"\n⚠ Could not retrieve token usage summary: {e}")
@@ -1007,6 +1034,6 @@ if error_count:
 # MAGIC     length(transcribed_text) AS text_length,
 # MAGIC     processed_at
 # MAGIC FROM workspace.genealogy.ocr_transcriptions
-# MAGIC WHERE folder_path LIKE '%Family_CUTHBERTSON%'
+# MAGIC WHERE folder_path LIKE '%Family_CAUNT%'
 # MAGIC ORDER BY file_name, page_index
 # MAGIC LIMIT 50
