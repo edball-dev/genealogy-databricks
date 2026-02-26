@@ -114,7 +114,6 @@ DOC_TYPE_VOCABULARY = [
     "Census",
     "BirthCertificate",
     "MarriageCertificate",
-    "MarriageBanns",
     "DeathCertificate",
     "BaptismRegister",
     "BurialRegister",
@@ -129,7 +128,7 @@ DOC_TYPE_VOCABULARY = [
     "PassengerList",
     "Directory",
     "CV",
-    "CriminalRegister",
+    "CriminalRecord",
     "Other",
 ]
 
