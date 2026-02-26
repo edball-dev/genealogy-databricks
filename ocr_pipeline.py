@@ -114,6 +114,7 @@ DOC_TYPE_VOCABULARY = [
     "Census",
     "BirthCertificate",
     "MarriageCertificate",
+    "MarriageBanns",
     "DeathCertificate",
     "BaptismRegister",
     "BurialRegister",
@@ -124,6 +125,11 @@ DOC_TYPE_VOCABULARY = [
     "MilitaryRecord",
     "BMDIndex",
     "PoorLawRecord",
+    "MonumentalInscription",
+    "PassengerList",
+    "Directory",
+    "CV",
+    "CriminalRegister",
     "Other",
 ]
 
@@ -1034,6 +1040,6 @@ if error_count:
 # MAGIC     length(transcribed_text) AS text_length,
 # MAGIC     processed_at
 # MAGIC FROM workspace.genealogy.ocr_transcriptions
-# MAGIC WHERE folder_path LIKE '%Family_CAUNT%'
+# MAGIC WHERE folder_path LIKE '%Family_AMBROSE%'
 # MAGIC ORDER BY file_name, page_index
 # MAGIC LIMIT 50
