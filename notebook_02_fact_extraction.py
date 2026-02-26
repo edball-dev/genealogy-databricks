@@ -201,6 +201,8 @@ def _call_gemini_once(prompt: str) -> dict:
         config=types.GenerateContentConfig(
             temperature=0.1,
             max_output_tokens=8192,
+            # thinking_config=types.ThinkingConfig(thinking_level="LOW"), # reduce Gemini 3 thinking to keep token use down - uncomment if token count is too high
+            http_options=types.HttpOptions(timeout=120000),  # 2 minutes in milliseconds
         ),
     )
 
@@ -229,14 +231,15 @@ def _call_gemini_once(prompt: str) -> dict:
 
 @retry(
     retry=retry_if_exception_type((
-        google.api_core.exceptions.ResourceExhausted,
+        google.api_core.exceptions.ResourceExhausted,  # 429
         google.api_core.exceptions.TooManyRequests,
+        google.api_core.exceptions.DeadlineExceeded,   # 504
+        google.api_core.exceptions.Cancelled,          # 499
     )),
     wait=wait_random_exponential(multiplier=1, max=60),
     stop=stop_after_attempt(MAX_RETRIES),
     before_sleep=lambda rs: print(
-        f"    Rate limited (429) — attempt {rs.attempt_number} failed, "
-        f"retrying in {rs.next_action.sleep:.1f}s"
+        f"    Rate limited (429) — attempt {rs.attempt_number} failed, retrying..."
     ),
 )
 def call_gemini_with_retry(prompt: str) -> dict:
