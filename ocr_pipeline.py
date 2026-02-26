@@ -32,6 +32,10 @@
 # MAGIC         vertexai.generative_models is deprecated as of June 2025, removed June 2026.
 # MAGIC         New pattern: google-genai client (client.models.generate_content) with
 # MAGIC         types.GenerateContentConfig and types.Part.from_bytes for image data.
+# MAGIC - v3.4: Log Gemini token usage per file to genealogy.ocr_token_usage Delta table.
+# MAGIC         _call_gemini_once now returns (result_dict, usage_dict) tuple.
+# MAGIC         call_gemini_with_retry and ocr_file updated to propagate usage.
+# MAGIC         _write_token_usage helper writes one row per file (non-fatal on failure).
 
 # COMMAND ----------
 
@@ -99,6 +103,7 @@ OUTPUT_SCHEMA      = "genealogy"
 SOURCE_TABLE       = f"{CATALOG}.{STAGING_SCHEMA}.documents"
 TRANSCRIPTIONS_TBL = f"{CATALOG}.{OUTPUT_SCHEMA}.ocr_transcriptions"
 PROC_LOG_TBL       = f"{CATALOG}.{OUTPUT_SCHEMA}.ocr_processing_log"
+TOKEN_USAGE_TBL    = f"{CATALOG}.{OUTPUT_SCHEMA}.ocr_token_usage"
 
 # --- Volume path ---
 VOLUME_BASE        = f"/Volumes/{CATALOG}/{STAGING_SCHEMA}/documents"
@@ -126,6 +131,7 @@ print(f"Processing folder : {FOLDER_PATH}")
 print(f"Source table      : {SOURCE_TABLE}")
 print(f"Transcriptions    : {TRANSCRIPTIONS_TBL}")
 print(f"Processing log    : {PROC_LOG_TBL}")
+print(f"Token usage       : {TOKEN_USAGE_TBL}")
 
 # COMMAND ----------
 
@@ -542,11 +548,13 @@ def extract_json(text: str) -> str:
     return text  # Return as-is and let json.loads raise a clear error
 
 
-def _call_gemini_once(file_bytes: bytes, mime_type: str, prompt: str) -> dict:
+def _call_gemini_once(file_bytes: bytes, mime_type: str, prompt: str) -> tuple:
     """
     Single attempt to call Gemini. Separated from retry logic so tenacity
     can wrap it cleanly without capturing non-retryable exceptions.
     Uses google-genai SDK (replaces deprecated vertexai.generative_models).
+    Returns (result_dict, usage_dict).
+    usage_dict keys: prompt_tokens, output_tokens, total_tokens.
     """
     image_part = types.Part.from_bytes(data=file_bytes, mime_type=mime_type)
 
@@ -559,21 +567,29 @@ def _call_gemini_once(file_bytes: bytes, mime_type: str, prompt: str) -> dict:
         ),
     )
 
+    # Capture token usage — always present even on safety blocks
+    um = response.usage_metadata
+    usage = {
+        "prompt_tokens":  getattr(um, "prompt_token_count",     0) or 0,
+        "output_tokens":  getattr(um, "candidates_token_count", 0) or 0,
+        "total_tokens":   getattr(um, "total_token_count",      0) or 0,
+    }
+
     # Detect safety block — candidates empty or content has no parts
     if not response.candidates:
-        return {"_safety_blocked": True}
+        return {"_safety_blocked": True}, usage
     candidate = response.candidates[0]
     if not candidate.content or not candidate.content.parts:
         return {
             "_safety_blocked": True,
             "_finish_reason": str(getattr(candidate, "finish_reason", "unknown")),
-        }
+        }, usage
 
     raw_text = response.text.strip()
     raw_text = extract_json(raw_text)
 
     try:
-        return json.loads(raw_text)
+        return json.loads(raw_text), usage
     except json.JSONDecodeError:
         return {
             "transcription":     raw_text,
@@ -583,7 +599,7 @@ def _call_gemini_once(file_bytes: bytes, mime_type: str, prompt: str) -> dict:
             "personal_names":    [],
             "locations":         [],
             "uncertain_entries": [],
-        }
+        }, usage
 
 
 @retry(
@@ -601,7 +617,7 @@ def _call_gemini_once(file_bytes: bytes, mime_type: str, prompt: str) -> dict:
         f"retrying in {rs.next_action.sleep:.1f}s"
     ),
 )
-def call_gemini_with_retry(file_bytes: bytes, mime_type: str, prompt: str) -> dict:
+def call_gemini_with_retry(file_bytes: bytes, mime_type: str, prompt: str) -> tuple:
     """
     Call Gemini with tenacity exponential backoff on 429 rate limit errors.
 
@@ -609,6 +625,7 @@ def call_gemini_with_retry(file_bytes: bytes, mime_type: str, prompt: str) -> di
     waits a random duration up to 2^attempt seconds, capped at 60 seconds.
     Jitter prevents retry storms when multiple files hit the limit simultaneously.
     Non-429 errors are raised immediately without retry.
+    Returns (result_dict, usage_dict) from _call_gemini_once.
     """
     return _call_gemini_once(file_bytes, mime_type, prompt)
 
@@ -657,11 +674,19 @@ def ocr_file(file_path: str, metadata: dict) -> tuple:
         page_mime = mime_type
 
     rows = []
+    file_prompt_tokens  = 0
+    file_output_tokens  = 0
+    file_total_tokens   = 0
+
     for page_index, page_bytes in enumerate(pages_bytes, 1):
-        result = call_gemini_with_retry(page_bytes, page_mime, prompt)
+        result, usage = call_gemini_with_retry(page_bytes, page_mime, prompt)
+
+        file_prompt_tokens  += usage["prompt_tokens"]
+        file_output_tokens  += usage["output_tokens"]
+        file_total_tokens   += usage["total_tokens"]
 
         if result.get("_safety_blocked"):
-            return [], "safety_blocked"
+            return [], "safety_blocked", file_prompt_tokens, file_output_tokens, file_total_tokens
 
         rows.append({
             "file_id":           metadata["file_id"],
@@ -686,7 +711,7 @@ def ocr_file(file_path: str, metadata: dict) -> tuple:
             "processed_at":      now,
         })
 
-    return rows, "success"
+    return rows, "success", file_prompt_tokens, file_output_tokens, file_total_tokens
 
 # COMMAND ----------
 
@@ -749,6 +774,41 @@ def write_log_row(row: dict):
     df.write.format("delta").mode("append").saveAsTable(PROC_LOG_TBL)
 
 
+TOKEN_USAGE_SCHEMA = StructType([
+    StructField("logged_at",      TimestampType(), True),
+    StructField("file_id",        StringType(),    True),
+    StructField("file_name",      StringType(),    True),
+    StructField("model_used",     StringType(),    True),
+    StructField("page_count",     IntegerType(),   True),
+    StructField("prompt_tokens",  IntegerType(),   True),
+    StructField("output_tokens",  IntegerType(),   True),
+    StructField("total_tokens",   IntegerType(),   True),
+])
+
+
+def _write_token_usage(file_id: str, file_name: str, page_count: int,
+                       prompt_tokens: int, output_tokens: int,
+                       total_tokens: int, logged_at):
+    """
+    Write token usage for one file to the usage log table.
+    Non-fatal — a failure here never aborts the main pipeline.
+    """
+    try:
+        df = spark.createDataFrame([{
+            "logged_at":     logged_at,
+            "file_id":       file_id,
+            "file_name":     file_name,
+            "model_used":    VERTEX_MODEL,
+            "page_count":    page_count,
+            "prompt_tokens": prompt_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens":  total_tokens,
+        }], schema=TOKEN_USAGE_SCHEMA)
+        df.write.format("delta").mode("append").saveAsTable(TOKEN_USAGE_TBL)
+    except Exception as e:
+        print(f"  ⚠ Token usage logging failed (non-fatal): {e}")
+
+
 # Keep summary-only accumulators for the end-of-run report.
 # Individual rows are no longer held in memory.
 all_rows_summary = []   # lightweight dicts: file_name, page_index, confidence, confidence_flag, confidence_notes
@@ -788,7 +848,7 @@ for i, file_row in enumerate(to_process_df, 1):
         print(f"  ⚠ Filename did not parse cleanly — using generic prompt")
 
     try:
-        rows, status = ocr_file(file_path, metadata)
+        rows, status, prompt_tokens, output_tokens, total_tokens = ocr_file(file_path, metadata)
 
         if status == "safety_blocked":
             print(f"  ✗ Blocked by Gemini safety filters")
@@ -798,6 +858,7 @@ for i, file_row in enumerate(to_process_df, 1):
                 "processed_at": now,
                 "error_message": "Response blocked by Gemini safety filters. Try converting to image and reprocessing.",
             })
+            _write_token_usage(file_id, file_name, 0, prompt_tokens, output_tokens, total_tokens, now)
             blocked_count += 1
             continue
 
@@ -809,6 +870,7 @@ for i, file_row in enumerate(to_process_df, 1):
             "status": "success", "page_count": len(rows), "model_used": VERTEX_MODEL,
             "processed_at": now, "error_message": None,
         })
+        _write_token_usage(file_id, file_name, len(rows), prompt_tokens, output_tokens, total_tokens, now)
 
         flagged    = any(r["confidence_flag"] for r in rows)
         confidence = rows[0]["confidence"] if rows else "unknown"
@@ -843,6 +905,28 @@ for i, file_row in enumerate(to_process_df, 1):
 print(f"\n{'='*50}")
 print(f"Run complete: {success_count} succeeded, {error_count} errors, "
       f"{blocked_count} safety blocked, {skipped_count} skipped  ({total} candidates)")
+
+# Print token usage totals for this run
+try:
+    usage_summary = spark.sql(f"""
+        SELECT
+            SUM(prompt_tokens)  AS prompt_tokens,
+            SUM(output_tokens)  AS output_tokens,
+            SUM(total_tokens)   AS total_tokens,
+            COUNT(*)            AS files_logged
+        FROM {TOKEN_USAGE_TBL}
+        WHERE file_id IN (
+            SELECT file_id FROM {PROC_LOG_TBL}
+            WHERE folder_path LIKE '%{FOLDER_NAME}%'
+              AND status IN ('success', 'safety_blocked')
+        )
+    """).collect()[0]
+    print(f"\nToken usage (this folder, all-time):")
+    print(f"  Prompt tokens : {usage_summary.prompt_tokens:,}")
+    print(f"  Output tokens : {usage_summary.output_tokens:,}")
+    print(f"  Total tokens  : {usage_summary.total_tokens:,}")
+except Exception as e:
+    print(f"\n⚠ Could not retrieve token usage summary: {e}")
 
 # COMMAND ----------
 
