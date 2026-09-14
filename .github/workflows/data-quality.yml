@@ -10,6 +10,10 @@ on:
 jobs:
   data-quality:
     runs-on: ubuntu-latest
+    # Secrets (DATABRICKS_HOST, DATABRICKS_TOKEN, DATABRICKS_WAREHOUSE,
+    # ASANA_PAT) live in the "production" GitHub environment, not as repo
+    # secrets — a job must declare that environment to see them.
+    environment: production
     steps:
       - uses: actions/checkout@v4
 
