@@ -19,6 +19,17 @@ YAML files (git is the source of truth; the Delta table is a queryable
 materialization, same pattern as ref_signal_weights), writes one row per
 check to genealogy.data_quality_results, and a newly-failing critical
 check files (or reuses) an Asana task.
+
+Selective execution (Phase 5): --only and --severity filter which checks
+run/report, same as always. --layer and --object additionally narrow which
+Tier 1 registry objects are even generated into checks -- for fast dev
+iteration and for scoping a pipeline-embedded QC task (Notion Test Plan §9)
+to one layer/table instead of the whole suite. Tier 2 checks/*.sql have no
+layer metadata yet, so --layer/--object never affect them. Critically,
+--layer/--object only narrow *this run's* check list -- the sync to
+genealogy.ref_data_quality_registry always uses the full, unfiltered
+registry, so a `--layer silver` run can never delete the bronze/gold/ref
+rows out of that shared table.
 """
 import argparse
 import json
@@ -111,12 +122,52 @@ def load_file_checks(only=None, severity=None):
     return apply_filters(checks, only, severity)
 
 
-def load_registry_seed():
-    """Load and merge every registry/tier1_*.yaml file's objects into one list."""
+def known_layers():
+    return sorted(
+        p.stem[len("tier1_"):-len("_registry")] for p in REGISTRY_DIR.glob("tier1_*_registry.yaml")
+    )
+
+
+def load_registry_seed(layer=None):
+    """Load and merge registry/tier1_*.yaml file(s)' objects into one list.
+
+    layer: optional comma-separated layer name(s) (e.g. "silver" or
+    "bronze,ref") to load only tier1_<layer>_registry.yaml for each,
+    instead of every tier1_*.yaml file. Errors loudly on an unknown layer
+    name rather than silently loading nothing.
+    """
+    if layer:
+        wanted = [name.strip().lower() for name in layer.split(",") if name.strip()]
+        paths = []
+        for name in wanted:
+            path = REGISTRY_DIR / f"tier1_{name}_registry.yaml"
+            if not path.exists():
+                raise FileNotFoundError(
+                    f"--layer '{name}' has no matching file at {path}. "
+                    f"Known layers: {', '.join(known_layers())}"
+                )
+            paths.append(path)
+    else:
+        paths = sorted(REGISTRY_DIR.glob("tier1_*.yaml"))
+
     objects = []
-    for path in sorted(REGISTRY_DIR.glob("tier1_*.yaml")):
+    for path in paths:
         objects.extend(yaml.safe_load(path.read_text())["objects"])
     return objects
+
+
+def filter_registry_objects(objects, object_name=None):
+    """Narrow registry objects to --object's comma-separated name(s), matching
+    either the fully-qualified name (genealogy.silver_person) or the bare
+    table name (silver_person)."""
+    if not object_name:
+        return objects
+    wanted = {name.strip().lower() for name in object_name.split(",") if name.strip()}
+    return [
+        obj
+        for obj in objects
+        if obj["name"].lower() in wanted or obj["name"].split(".")[-1].lower() in wanted
+    ]
 
 
 def build_tier1_check_sql(check_type, object_name, check_cfg):
@@ -470,14 +521,43 @@ def main():
         "--only", help="Comma-separated list of check IDs to run, e.g. DQ-001,DQ-006 or T1-ROW_COUNT_NOT_ZERO-GOLD_EVENT"
     )
     parser.add_argument("--severity", help="Only run checks of this severity (critical|warning|info)")
+    parser.add_argument(
+        "--layer",
+        help=(
+            "Comma-separated Tier 1 registry layer(s) to run, e.g. silver or bronze,ref "
+            "-- matches registry/tier1_<layer>_registry.yaml. Omit to run every layer "
+            "(the default). Tier 1 only: Tier 2 checks/*.sql always run regardless of "
+            f"--layer (use --only/--severity to narrow those). Known layers: {', '.join(known_layers())}."
+        ),
+    )
+    parser.add_argument(
+        "--object",
+        help=(
+            "Comma-separated Tier 1 registry object name(s) to run every check for, "
+            "e.g. genealogy.silver_person or silver_person,silver_family (bare table "
+            "name also matches). Tier 1 only, same scope note as --layer."
+        ),
+    )
     args = parser.parse_args()
 
-    registry_objects = load_registry_seed()
+    # The registry table sync always uses the FULL, unfiltered registry --
+    # --layer/--object narrow which checks THIS RUN executes, never what
+    # genealogy.ref_data_quality_registry (a shared materialization other
+    # surfaces may read) contains. A `--layer silver` run must not delete
+    # the bronze/gold/ref rows out of that table.
+    full_registry_objects = load_registry_seed()
+    run_registry_objects = filter_registry_objects(
+        load_registry_seed(layer=args.layer), object_name=args.object
+    )
+
     checks = load_file_checks(only=args.only, severity=args.severity) + build_tier1_checks(
-        registry_objects, only=args.only, severity=args.severity
+        run_registry_objects, only=args.only, severity=args.severity
     )
     if not checks:
-        print("No checks matched the given filters.", file=sys.stderr)
+        print(
+            "No checks matched the given filters (--only/--severity/--layer/--object).",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     run_id = str(uuid.uuid4())
@@ -485,7 +565,7 @@ def main():
     cursor = conn.cursor()
     ensure_results_table(cursor)
     ensure_registry_table(cursor)
-    sync_registry_table(cursor, registry_objects)
+    sync_registry_table(cursor, full_registry_objects)
 
     results = []
     for check in checks:

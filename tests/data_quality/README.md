@@ -47,6 +47,27 @@ python run_checks.py --only T1-FRESHNESS_VS_SOURCE-GOLD_DNA_COVERAGE
 python run_checks.py --severity critical
 ```
 
+Two more filters narrow **Tier 1 only** (added for Phase 5, selective
+execution — for fast dev iteration and for scoping a future
+pipeline-embedded QC task, Notion §9, to just its own layer instead of the
+whole suite):
+
+```bash
+python run_checks.py --layer silver
+python run_checks.py --layer bronze,ref
+python run_checks.py --object genealogy.silver_person
+python run_checks.py --object silver_person,silver_family    # bare table name also matches
+```
+
+`--layer`/`--object` never affect Tier 2 `checks/*.sql` files — they have
+no layer metadata, so they always run (combine with `--only`/`--severity`
+to narrow those too). All four filters compose (AND together) with each
+other. **`--layer`/`--object` only narrow which checks this invocation
+runs and reports — the sync to `genealogy.ref_data_quality_registry`
+(a shared, queryable materialization) always uses the full, unfiltered
+registry**, so a `--layer silver` run can never delete the bronze/gold/ref
+rows out of that table.
+
 Exit code is non-zero only if a `critical`-severity check **newly** failed
 (i.e. wasn't already `known_failing`) — a `known_failing` check that is
 still failing does not turn the run red.
