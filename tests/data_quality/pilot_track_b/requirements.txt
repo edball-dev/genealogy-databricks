@@ -1,0 +1,2 @@
+soda-core==4.23.1
+soda-databricks==4.23.1

@@ -1,0 +1,26 @@
+# Soda Core v4 data source config for workspace.genealogy.
+#
+# Confirmed against installed soda-core==4.23.1 / soda-databricks==4.23.1
+# package source (no bundled scaffolding for databricks — `soda data-source
+# create -t databricks` only supports "-t postgres" as of this version, so
+# this was hand-written from soda_databricks/model/data_source/
+# databricks_connection_properties.py rather than copied from docs).
+#
+# Connects via the SQL connector mode (soda-databricks wraps
+# databricks-sql-connector under the hood, same library the hand-rolled
+# runner and the production run_checks.py use) — not sparkdf, per spec §5,
+# confirmed by inspecting soda_databricks' own dependency on
+# databricks-sql-connector rather than pyspark.
+#
+# ${VAR} references resolve against environment variables at parse time
+# (soda_core.common.yaml.YamlSource.parse_and_resolve, use_env_vars=True by
+# default) — same DATABRICKS_HOST / DATABRICKS_TOKEN / DATABRICKS_WAREHOUSE
+# names already used by tests/data_quality/run_checks.py, so both pilot
+# tracks and the existing suite share one set of secrets.
+type: databricks
+name: workspace
+connection:
+  host: ${DATABRICKS_HOST}
+  http_path: ${DATABRICKS_WAREHOUSE}
+  catalog: workspace
+  access_token: ${DATABRICKS_TOKEN}
