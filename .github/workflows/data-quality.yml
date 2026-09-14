@@ -1,10 +1,8 @@
 name: Data Quality
 
 on:
-  schedule:
-    # 4:00 AM UTC — two hours after the 2am UTC OCR pipeline run and any
-    # manual GEDCOM refresh, so checks run against settled data.
-    - cron: "0 4 * * *"
+  push:
+    branches: [main]
   workflow_dispatch: {}
 
 jobs:
