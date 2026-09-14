@@ -4,8 +4,8 @@ Two-tier data quality checks against `workspace.genealogy` (Data Quality
 Test Plan, Notion §7): **Tier 2** hand-written `checks/*.sql` files for
 business rules, aggregate reconciliation, and regression guards; **Tier 1**
 config-driven `registry/tier1_*.yaml` files for generic checks
-(row-count-not-zero, freshness-vs-source, not-null, uniqueness, FK
-integrity) that would otherwise be dozens of near-identical files. Both
+(row-count-not-zero, freshness-vs-source, not-null, not-blank, uniqueness,
+FK integrity) that would otherwise be dozens of near-identical files. Both
 compile down to the same contract — a SELECT
 that returns *violating rows*, zero rows means the check passes — so there
 is one execution/results/Asana-dedup path (`run_checks.py`) for both, and
@@ -229,6 +229,72 @@ the triage skill's bucket-B confidence bar, but referenced against the same
 task with a "needs further triage" note rather than silently passed over.
 All ~24 `fk_integrity` checks otherwise came back with **zero** orphaned
 rows — a clean result, not a gap.
+
+### Bronze layer (`tier1_bronze_registry.yaml`)
+
+Covers the GEDCOM ingest pipeline's bronze/control tables — `bronze_gedcom`,
+`bronze_gedcom_with_record` (view), `bronze_gedcom_enriched`,
+`control_ingested_gedcom`, `control_latest_gedcom` (view) — traced from
+`01_ingest_gedcom.ipynb`/`02_enrich_gedcom.ipynb`. Reuses the two gold check
+types (`row_count_not_zero`, `freshness_vs_source`) rather than introducing
+new ones — per Notion §8, bronze only needs "row-count-not-zero, freshness
+vs last known ingest run," which is the same shape as gold's checks, just
+one hop earlier in the DAG. `bronze_gedcom` itself is the pipeline's root
+(no other in-warehouse table to compare freshness against) so it only gets
+`row_count_not_zero`; `bronze_gedcom_enriched`'s `freshness_vs_source`
+`depends_on` is flattened to `bronze_gedcom` (the managed table), never the
+`bronze_gedcom_with_record` view it's actually built from — same
+never-a-view-in-`depends_on` rule as gold. `ocr_transcriptions`/
+`ocr_processing_log`/`ocr_token_usage` are bronze-shaped per §8's own
+definition but deliberately excluded here — `ocr_transcriptions` already
+has a dedicated Tier 2 check (DQ-005) and Notion §9 treats OCR output as
+feeding the silver layer rather than a standalone bronze stage; revisit if
+the OCR workflow gets its own Tier 1 pass.
+
+### Ref layer (`tier1_ref_registry.yaml`)
+
+Covers hand-maintained lookup/config tables: `ref_intent_category_weights`,
+`ref_signal_weights`, `ref_week_plan`, and `genealogy.v_source_doctype_map`
+(not `ref_`-prefixed, but functionally identical — its own definition is a
+literal `CREATE OR REPLACE VIEW ... AS SELECT * FROM (VALUES (...), ...)`,
+a hardcoded lookup, not a query over other tables). Excludes
+`ref_research_resources` (out of scope for this whole suite, see the top of
+this file) and `ref_data_quality_registry` (this suite's own
+materialization of its registry files — checking it with itself would be
+circular). One new check type beyond gold/silver's:
+
+```yaml
+- name: genealogy.ref_signal_weights
+  type: table
+  checks:
+    - check_type: row_count_not_zero
+      severity: critical
+    - check_type: not_blank
+      column: signal_code
+      severity: critical
+    - check_type: uniqueness
+      columns: [signal_code]
+      severity: critical
+```
+
+| `check_type` | What it checks | Config keys |
+|---|---|---|
+| `not_blank` | `column` is never `NULL` **or** an empty/whitespace string (`column IS NULL OR TRIM(column) = ''`). | `column` |
+
+`not_blank` is distinct from `not_null` because ref-layer keys are
+hand-typed strings (`signal_code`, `source_title`, ...) rather than
+auto-generated GEDCOM/UUID ids — an accidental blank string is a real,
+separate risk from a `NULL` one, and matches §8's own wording for this
+layer ("no-blank-key-values"), not silver's "not-null." A column with no
+string-blank equivalent (e.g. `ref_week_plan.week_commencing`, a `DATE`)
+still uses plain `not_null`.
+
+Severity: `critical` throughout this file (`row_count_not_zero`,
+`not_blank`, `uniqueness`) — these are small, hand-maintained tables where
+a missing/blank/duplicate key silently breaks downstream scoring or signal
+logic per §8's own rationale, not a "recoverable" issue the way a silver FK
+orphan is. No `fk_integrity` checks here — none of these tables reference
+another table's key.
 
 ### Adding a new Tier 1 entry
 

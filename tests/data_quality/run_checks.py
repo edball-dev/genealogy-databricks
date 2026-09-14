@@ -6,11 +6,13 @@ Two check-authoring sources feed the same execution path:
   violating rows (zero rows = pass) — business rules, aggregate
   reconciliation, regression guards.
 - Tier 1: registry/tier1_*.yaml (one file per layer — tier1_gold_registry.yaml
-  from Phase 1, tier1_silver_registry.yaml from Phase 2), a config-driven
-  registry of generic checks generated into the same SELECT-returns-violations
-  shape. Gold check types: row_count_not_zero, freshness_vs_source. Silver
-  check types: not_null, uniqueness, fk_integrity. See
-  tests/data_quality/README.md for all formats.
+  from Phase 1, tier1_silver_registry.yaml from Phase 2, tier1_bronze_registry.yaml
+  and tier1_ref_registry.yaml from Phase 3), a config-driven registry of
+  generic checks generated into the same SELECT-returns-violations shape.
+  Gold/bronze check types: row_count_not_zero, freshness_vs_source. Silver
+  check types: not_null, uniqueness, fk_integrity. Ref check types adds
+  not_blank (NULL or empty-string). See tests/data_quality/README.md for
+  all formats.
 
 Every run syncs genealogy.ref_data_quality_registry from the checked-in
 YAML files (git is the source of truth; the Delta table is a queryable
@@ -144,6 +146,10 @@ def build_tier1_check_sql(check_type, object_name, check_cfg):
         column = check_cfg["column"]
         return f"SELECT * FROM {object_name} WHERE {column} IS NULL"
 
+    if check_type == "not_blank":
+        column = check_cfg["column"]
+        return f"SELECT * FROM {object_name} WHERE {column} IS NULL OR TRIM({column}) = ''"
+
     if check_type == "uniqueness":
         columns = ", ".join(check_cfg["columns"])
         return (
@@ -167,6 +173,8 @@ def build_tier1_check_sql(check_type, object_name, check_cfg):
 def tier1_check_label(check_type, check_cfg):
     """Column/key description used in the derived check id and title."""
     if check_type == "not_null":
+        return check_cfg["column"]
+    if check_type == "not_blank":
         return check_cfg["column"]
     if check_type == "uniqueness":
         return "_".join(check_cfg["columns"])
