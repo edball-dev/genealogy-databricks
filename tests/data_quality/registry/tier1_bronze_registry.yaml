@@ -1,0 +1,91 @@
+# Tier 1 (generic, config-driven) check registry — Phase 3 of the Data
+# Quality Test Plan (Notion §8/§10). Same pattern as tier1_gold_registry.yaml
+# (Phase 1) and tier1_silver_registry.yaml (Phase 2): this YAML is the
+# checked-in source of truth, genealogy.ref_data_quality_registry is a
+# queryable Delta materialization of it, synced on every run_checks.py run.
+#
+# Scope: the bronze layer, per §8 — "Direct Fivetran/GEDCOM/OCR ingest,
+# minimally transformed... row-count-not-zero, freshness vs last known
+# ingest run... garbage-in is expected here, heavy validation belongs
+# downstream." Confirmed live in workspace.genealogy on 2026-09-14
+# (list_tables + describe_table + tracing 01_ingest_gedcom.ipynb /
+# 02_enrich_gedcom.ipynb):
+#
+#   - bronze_gedcom (MANAGED): raw GEDCOM lines, overwritten whole on every
+#     ingest run. Root of the pipeline — no other in-warehouse table to
+#     compare freshness against, so row-count-not-zero only.
+#   - bronze_gedcom_with_record (VIEW): `CREATE OR REPLACE VIEW ... FROM
+#     bronze_gedcom` (adds a derived record_xref column via window
+#     function) — a plain view, so row-count-not-zero only, same
+#     "a view is never independently stale" reasoning as gold/silver views.
+#   - bronze_gedcom_enriched (MANAGED): built by 02_enrich_gedcom.ipynb
+#     from bronze_gedcom_with_record (the view above), overwritten whole
+#     each run. freshness_vs_source depends_on is flattened to
+#     bronze_gedcom (the underlying managed table), never the view itself —
+#     same rule as Phase 1's gold registry (DESCRIBE HISTORY has no Delta
+#     log for a view).
+#   - control_ingested_gedcom (MANAGED): append-only ingest manifest — one
+#     row per GEDCOM file ever ingested (file_id, size, record_count, hash,
+#     ingested_at), written by 01_ingest_gedcom.ipynb. This is the actual
+#     "last known ingest run" record. Freshness doesn't fit the same
+#     depends_on shape (it's the ingest event log itself, not derived from
+#     another table) — same "append-only log" treatment as Phase 1's
+#     gold_scores_snapshot_branch/_person, row-count-not-zero only.
+#   - control_latest_gedcom (VIEW): points at the single most-recently
+#     Fivetran-synced GEDCOM file in the staging volume (source for
+#     01_ingest_gedcom.ipynb's idempotency check) — a view, row-count-not-
+#     zero only. Currently always exactly 1 row by design (singleton
+#     pointer), so row-count-not-zero is really checking "this pointer
+#     hasn't gone missing," not tracking a growing count.
+#
+# ocr_transcriptions / ocr_processing_log / ocr_token_usage are also named
+# by §8 as bronze-ish ("...OCR ingest, minimally transformed") but are
+# deliberately left out of this registry: ocr_transcriptions already has a
+# dedicated Tier 2 check (DQ-005, duplicate transcribed text), and Ed's own
+# framing in Notion §9 treats the OCR workflow's output as feeding directly
+# into the silver layer (`ocr_transcriptions, silver_document_person, etc.`)
+# rather than as a standalone bronze stage — revisit if/when the OCR
+# workflow gets its own Tier 1 coverage pass rather than folding it in here
+# without a clear owner.
+#
+# research_session_log is excluded — it's an app operational log, not a
+# pipeline layer, and is already a named Tier 2 candidate in §3
+# ("research_session_log.score_delta_actual completeness").
+#
+# Every check below was run against workspace.genealogy on 2026-09-14
+# before being added (row counts, and the freshness_vs_source query for
+# bronze_gedcom_enriched via DESCRIBE HISTORY) — all passed clean.
+
+objects:
+  - name: genealogy.bronze_gedcom
+    type: table
+    checks:
+      - check_type: row_count_not_zero
+        severity: critical
+
+  - name: genealogy.bronze_gedcom_with_record
+    type: view
+    checks:
+      - check_type: row_count_not_zero
+        severity: critical
+
+  - name: genealogy.bronze_gedcom_enriched
+    type: table
+    checks:
+      - check_type: row_count_not_zero
+        severity: critical
+      - check_type: freshness_vs_source
+        severity: warning
+        depends_on: [genealogy.bronze_gedcom]
+
+  - name: genealogy.control_ingested_gedcom
+    type: table
+    checks:
+      - check_type: row_count_not_zero
+        severity: critical
+
+  - name: genealogy.control_latest_gedcom
+    type: view
+    checks:
+      - check_type: row_count_not_zero
+        severity: critical

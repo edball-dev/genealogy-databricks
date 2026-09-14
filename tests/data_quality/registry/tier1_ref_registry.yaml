@@ -1,0 +1,106 @@
+# Tier 1 (generic, config-driven) check registry — Phase 3 of the Data
+# Quality Test Plan (Notion §8/§10). Same pattern as tier1_gold_registry.yaml
+# (Phase 1) and tier1_silver_registry.yaml (Phase 2): this YAML is the
+# checked-in source of truth, genealogy.ref_data_quality_registry is a
+# queryable Delta materialization of it, synced on every run_checks.py run.
+#
+# Scope: the ref/config layer, per §8 — "Curated/manually-maintained lookup
+# tables... row-count-not-zero, no-blank-key-values... small, slow-changing,
+# but silently breaks scoring/signal logic if a row goes missing." Confirmed
+# live in workspace.genealogy on 2026-09-14 (list_tables + describe_table):
+#
+#   - ref_intent_category_weights (MANAGED, 5 rows): (intent, category) is
+#     the natural key, weight is the value.
+#   - ref_signal_weights (MANAGED, 42 rows): signal_code is the natural key
+#     (30 columns of scoring/eligibility config per signal).
+#   - ref_week_plan (MANAGED, 96 rows): week_commencing is the primary key
+#     per its own column comment ("Sunday of the week (primary key)").
+#   - genealogy.v_source_doctype_map (VIEW, 108 rows): NOT ref_-prefixed,
+#     but functionally a hand-maintained lookup — its own definition
+#     (notebook_01_document_matching.ipynb) is a literal `CREATE OR REPLACE
+#     VIEW ... AS SELECT * FROM (VALUES (...), (...), ...)`, i.e. a
+#     hardcoded config table, not a query over other tables. source_title
+#     is the natural key, doc_type_category the value. Included here on
+#     content, not naming convention.
+#
+# Two ref/config-shaped tables deliberately excluded:
+#   - ref_research_resources: explicitly out of scope for this whole suite
+#     per this file's own README (checks tracked separately, Asana task
+#     1218304496999021 — a 5-check tranche already fully specified there).
+#   - ref_data_quality_registry: this suite's own materialization of these
+#     very registry files — checking it with itself would be circular, and
+#     it isn't domain data.
+#
+# `no-blank-key-values` (§8's own wording, distinct from silver's plain
+# not_null) is implemented as a new check_type, not_blank — WHERE column IS
+# NULL OR TRIM(column) = ''. Ref-layer keys are hand-typed strings (unlike
+# silver's mostly auto-generated GEDCOM/UUID ids), so an accidental blank
+# string is a real, distinct risk from a NULL one and worth catching
+# separately. ref_week_plan.week_commencing is a DATE with no string-blank
+# equivalent, so it gets plain not_null instead.
+#
+# Severity: critical throughout (row_count_not_zero, not_blank, uniqueness)
+# — these are all small, hand-maintained tables where a missing/blank/
+# duplicate key silently breaks downstream scoring or signal logic per §8's
+# own rationale, not a "recoverable" issue the way a silver FK orphan is.
+# No fk_integrity checks in this file — none of these tables reference
+# another table's key.
+#
+# Every check below was run against workspace.genealogy on 2026-09-14
+# before being added (not_blank and uniqueness queries run directly) — all
+# passed clean, zero violations.
+
+objects:
+  - name: genealogy.ref_intent_category_weights
+    type: table
+    checks:
+      - check_type: row_count_not_zero
+        severity: critical
+      - check_type: not_blank
+        column: intent
+        severity: critical
+      - check_type: not_blank
+        column: category
+        severity: critical
+      - check_type: uniqueness
+        columns: [intent, category]
+        severity: critical
+
+  - name: genealogy.ref_signal_weights
+    type: table
+    checks:
+      - check_type: row_count_not_zero
+        severity: critical
+      - check_type: not_blank
+        column: signal_code
+        severity: critical
+      - check_type: uniqueness
+        columns: [signal_code]
+        severity: critical
+
+  - name: genealogy.ref_week_plan
+    type: table
+    checks:
+      - check_type: row_count_not_zero
+        severity: critical
+      - check_type: not_null
+        column: week_commencing
+        severity: critical
+      - check_type: uniqueness
+        columns: [week_commencing]
+        severity: critical
+
+  - name: genealogy.v_source_doctype_map
+    type: view
+    checks:
+      - check_type: row_count_not_zero
+        severity: critical
+      - check_type: not_blank
+        column: source_title
+        severity: critical
+      - check_type: not_blank
+        column: doc_type_category
+        severity: critical
+      - check_type: uniqueness
+        columns: [source_title]
+        severity: critical
