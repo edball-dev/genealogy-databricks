@@ -3,9 +3,10 @@
 Two-tier data quality checks against `workspace.genealogy` (Data Quality
 Test Plan, Notion §7): **Tier 2** hand-written `checks/*.sql` files for
 business rules, aggregate reconciliation, and regression guards; **Tier 1**
-a config-driven `registry/tier1_gold_registry.yaml` for generic checks
-(row-count-not-zero, freshness-vs-source) that would otherwise be dozens of
-near-identical files. Both compile down to the same contract — a SELECT
+config-driven `registry/tier1_*.yaml` files for generic checks
+(row-count-not-zero, freshness-vs-source, not-null, uniqueness, FK
+integrity) that would otherwise be dozens of near-identical files. Both
+compile down to the same contract — a SELECT
 that returns *violating rows*, zero rows means the check passes — so there
 is one execution/results/Asana-dedup path (`run_checks.py`) for both, and
 one authoring surface across all four run surfaces: ad hoc from Claude in
@@ -91,16 +92,28 @@ SELECT ...
 4. Add the same check to `data_quality_suite.ipynb` (it loops over these
    same files, so this is usually automatic — confirm rather than assume).
 
-## Tier 1 registry (`registry/tier1_gold_registry.yaml`)
+## Tier 1 registry (`registry/tier1_*.yaml`)
 
-Generic checks for the gold layer (Phase 1 of the Test Plan — Phase 2 will
-add a silver-layer registry with not-null/uniqueness/FK checks, per Notion
-§8). `registry/tier1_gold_registry.yaml` is the checked-in source of
-truth; `genealogy.ref_data_quality_registry` is a queryable Delta
-materialization of it, re-synced (delete + re-insert) on every
+Generic checks, config-driven instead of one `.sql` file per check.
+`registry/tier1_gold_registry.yaml` (Phase 1 of the Test Plan) covers the
+full gold layer — row-count and freshness; `registry/tier1_silver_registry.yaml`
+(Phase 2, per Notion §8) covers the full silver layer — not-null,
+uniqueness, and FK integrity. `run_checks.py` and the notebook load
+**every** `registry/tier1_*.yaml` file (`REGISTRY_DIR.glob("tier1_*.yaml")`),
+merging their objects into one check list — adding a new layer later means
+adding a new `tier1_<layer>_registry.yaml` file, not editing an existing
+one. These files are the checked-in source of truth;
+`genealogy.ref_data_quality_registry` is a queryable Delta materialization
+of all of them combined, re-synced (delete + re-insert) on every
 `run_checks.py` run — same "config lives in `ref_*` tables" pattern as
 `ref_signal_weights`, but git stays authoritative so registry changes go
-through PR review like everything else.
+through PR review like everything else. (The Delta table's schema grew in
+Phase 2 — `run_checks.py`'s `ensure_registry_table` checks `DESCRIBE TABLE`
+and runs `ALTER TABLE ... ADD COLUMNS` for any new columns rather than
+assuming `CREATE TABLE IF NOT EXISTS` will add them; it won't, since the
+table already exists.)
+
+### Gold layer (`tier1_gold_registry.yaml`)
 
 Each entry is a gold object (`table` or `view`) with a list of checks:
 
@@ -139,20 +152,104 @@ CREATE-OR-REPLACE gold table — the right check ("did today's snapshot get
 written") isn't built yet. `gold_research_action`/`_signal_action` are
 static, hand-maintained reference lists with no freshness concept at all.
 
+### Silver layer (`tier1_silver_registry.yaml`)
+
+Covers all 28 managed `silver_*` tables (excludes the one silver *view*,
+`silver_v_active_place_canonical` — no natural key/FK shape to check on a
+view beyond what its underlying tables already cover — and
+`silver_article_chunk_index`, a dead table per the `article-resource-search`
+skill). Three check types, in addition to the two gold ones above:
+
+```yaml
+- name: genealogy.silver_relationship
+  type: table
+  checks:
+    - check_type: not_null
+      column: person_id_1
+      severity: critical
+    - check_type: uniqueness
+      columns: [person_id_1, person_id_2, relationship_type]
+      severity: critical
+    - check_type: fk_integrity
+      column: person_id_1
+      ref_table: genealogy.silver_person
+      ref_column: person_gedcom_id
+      severity: warning
+```
+
+| `check_type` | What it checks | Config keys |
+|---|---|---|
+| `not_null` | `column` has no `NULL` values. | `column` |
+| `uniqueness` | The combination of `columns` has no duplicate groups (`GROUP BY ... HAVING COUNT(*) > 1`). | `columns` (list — one column is fine as a single-item list) |
+| `fk_integrity` | Every non-null `column` value in this table exists as `ref_column` in `ref_table` (`NOT EXISTS` anti-join). | `column`, `ref_table`, `ref_column` |
+
+Severity defaults (confirmed by Ed, 2026-09-14): `critical` for
+`not_null` and `uniqueness`, `warning` for `fk_integrity` — same reasoning
+as the gold defaults (a null/duplicate in a key column is a hard
+data-integrity break; an orphaned FK is usually recoverable/traceable and
+shouldn't block a run by itself).
+
+Keys and FK relationships were traced from each table's actual build
+notebook (`CREATE TABLE`/`MERGE`/`.saveAsTable()` statements, Delta `NOT
+NULL` DDL, and column comments where present) — never guessed from column
+names alone.
+
+**Validation gotcha — don't batch uniqueness checks with `CONCAT`.** Doing
+a quick manual pre-check across many tables at once via
+`COUNT(DISTINCT CONCAT(col1, '|', col2, ...))` will produce false-positive
+"duplicates" whenever any of the concatenated columns is nullable: SQL
+`CONCAT()` returns `NULL` if *any* argument is `NULL`, and `COUNT(DISTINCT
+x)` doesn't count `NULL`s — so every row with a null in one of the
+columns silently collapses out of the distinct count, making the row count
+look larger than the distinct count even with zero real duplicates. This
+produced apparent duplicates for `silver_event_source` (169 "dupes") and
+`silver_person_source` (181 "dupes") that turned out to be **zero** real
+duplicates once re-checked with a direct `GROUP BY ... HAVING COUNT(*) >
+1` (which is what the shipped `uniqueness` check actually runs — the
+production check type was never affected, only this ad hoc validation
+shortcut).
+
+**Validation gotcha — don't batch FK checks into one query.** Running
+several correlated `NOT EXISTS` subqueries together in one `SELECT` (via
+`UNION ALL` or scalar subqueries) intermittently triggers `[INTERNAL_ERROR]
+The Spark SQL phase optimization failed` — validate each FK check as its
+own standalone query, which is also exactly how `fk_integrity` runs in
+production (one query per check).
+
+**Findings from Phase 2 validation** (see the `failing-check-triage`
+skill's classification): 8 duplicate `(person_id_1, person_id_2,
+relationship_type)` rows in `silver_relationship` plus 10 duplicate rows in
+`silver_event_participant`, both traced to duplicate family/person records
+in the source GEDCOM — filed as Asana task `1218472474949479`
+(`known_failing: true` on those two checks references it).
+`silver_person_source`/`silver_event_source` have ~180/169 rows with a null
+`source_xref` (root cause unconfirmed — could be a valid GEDCOM
+inline-citation style or an extraction gap) — not filed as its own task per
+the triage skill's bucket-B confidence bar, but referenced against the same
+task with a "needs further triage" note rather than silently passed over.
+All ~24 `fk_integrity` checks otherwise came back with **zero** orphaned
+rows — a clean result, not a gap.
+
 ### Adding a new Tier 1 entry
 
-1. Add an entry to `registry/tier1_gold_registry.yaml`. Trace
-   `depends_on` from the table's actual build notebook (grep the `.ipynb`
-   files for `CREATE (OR REPLACE) TABLE genealogy.<name>` and read its
-   `FROM`/`JOIN` clauses) — don't guess lineage.
-2. Validate live before merging: run the row-count and (if applicable)
-   freshness SQL by hand via the Databricks MCP `execute_sql` tool first
-   (see `build_tier1_check_sql` in `run_checks.py` for the exact template),
-   the same way Tier 2 checks get validated. `python run_checks.py --only
-   T1-<CHECK_TYPE>-<TABLE>` also works once the entry exists.
-3. No `data_quality_suite.ipynb` change needed — the notebook should call
-   `run_checks.py`'s Tier 1 path the same way it calls the Tier 2 one
-   (confirm rather than assume, same as Tier 2).
+1. Add an entry to the relevant `registry/tier1_<layer>_registry.yaml`
+   (or create a new `tier1_<layer>_registry.yaml` file for a layer that
+   doesn't have one yet — the loader picks up any file matching that glob
+   automatically). Trace `depends_on`/keys/FKs from the table's actual
+   build notebook (grep the `.ipynb` files for `CREATE (OR REPLACE) TABLE
+   genealogy.<name>` / `MERGE INTO` and read its `FROM`/`JOIN` clauses and
+   `NOT NULL`/comment DDL) — don't guess lineage or keys.
+2. Validate live before merging: run the check's SQL by hand via the
+   Databricks MCP `execute_sql` tool first (see `build_tier1_check_sql` in
+   `run_checks.py` for the exact template per `check_type`), the same way
+   Tier 2 checks get validated. `python run_checks.py --only
+   T1-<CHECK_TYPE>-<TABLE>[-<LABEL>]` also works once the entry exists
+   (uniqueness/not_null/fk_integrity IDs get a `-<COLUMN(S)>` suffix so
+   multiple checks of the same type on one table don't collide — see
+   `tier1_check_label` in `run_checks.py`).
+3. No `data_quality_suite.ipynb` change needed — the notebook loads every
+   `registry/tier1_*.yaml` file the same way `run_checks.py` does (confirm
+   rather than assume, same as Tier 2).
 
 ## Results table
 
