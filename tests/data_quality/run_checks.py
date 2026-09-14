@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
-"""Run the SQL data-quality checks in checks/*.sql against workspace.genealogy.
+"""Run the data-quality checks (Tier 2 files + Tier 1 registry) against workspace.genealogy.
 
-Each check file is a SELECT that returns violating rows (zero rows = pass).
-Every run writes one row per check to genealogy.data_quality_results, and a
-newly-failing critical check files (or reuses) an Asana task. See
-tests/data_quality/README.md for the check file format and how to run this
-locally.
+Two check-authoring sources feed the same execution path:
+- Tier 2: hand-written checks/*.sql files, each a SELECT that returns
+  violating rows (zero rows = pass) — business rules, aggregate
+  reconciliation, regression guards.
+- Tier 1: registry/tier1_gold_registry.yaml, a config-driven registry of
+  generic checks (row-count-not-zero, freshness-vs-source) generated into
+  the same SELECT-returns-violations shape. See
+  tests/data_quality/README.md for both formats.
+
+Every run syncs genealogy.ref_data_quality_registry from the checked-in
+YAML (git is the source of truth; the Delta table is a queryable
+materialization, same pattern as ref_signal_weights), writes one row per
+check to genealogy.data_quality_results, and a newly-failing critical
+check files (or reuses) an Asana task.
 """
 import argparse
 import json
@@ -18,9 +27,11 @@ from decimal import Decimal
 from pathlib import Path
 
 import requests
+import yaml
 from databricks import sql
 
 CHECKS_DIR = Path(__file__).parent / "checks"
+REGISTRY_SEED_PATH = Path(__file__).parent / "registry" / "tier1_gold_registry.yaml"
 SAMPLE_CAP = 20
 
 ASANA_API = "https://app.asana.com/api/1.0"
@@ -82,14 +93,75 @@ def parse_check_file(path):
     }
 
 
-def load_checks(only=None, severity=None):
-    checks = [parse_check_file(p) for p in sorted(CHECKS_DIR.glob("*.sql"))]
+def apply_filters(checks, only=None, severity=None):
     if only:
         wanted = {c.strip().upper() for c in only.split(",")}
         checks = [c for c in checks if c["id"].upper() in wanted]
     if severity:
         checks = [c for c in checks if c["severity"] == severity.lower()]
     return checks
+
+
+def load_file_checks(only=None, severity=None):
+    checks = [parse_check_file(p) for p in sorted(CHECKS_DIR.glob("*.sql"))]
+    return apply_filters(checks, only, severity)
+
+
+def load_registry_seed():
+    return yaml.safe_load(REGISTRY_SEED_PATH.read_text())["objects"]
+
+
+def build_tier1_check_sql(check_type, object_name, depends_on):
+    if check_type == "row_count_not_zero":
+        return f"SELECT 'EMPTY_TABLE' AS violation FROM (SELECT COUNT(*) AS n FROM {object_name}) t WHERE t.n = 0"
+
+    if check_type == "freshness_vs_source":
+        source_union = "\n    UNION ALL\n    ".join(
+            f"SELECT timestamp AS ts FROM (DESCRIBE HISTORY {src})" for src in depends_on
+        )
+        return (
+            "WITH target AS (\n"
+            f"  SELECT MAX(timestamp) AS last_write FROM (DESCRIBE HISTORY {object_name})\n"
+            "),\n"
+            "source AS (\n"
+            "  SELECT MAX(ts) AS last_write FROM (\n"
+            f"    {source_union}\n"
+            "  )\n"
+            ")\n"
+            "SELECT target.last_write AS target_last_write, source.last_write AS source_last_write\n"
+            "FROM target, source\n"
+            "WHERE target.last_write < source.last_write"
+        )
+
+    raise ValueError(f"unknown Tier 1 check_type: {check_type}")
+
+
+def build_tier1_checks(registry_objects, only=None, severity=None):
+    """Generate Tier 1 registry checks into the same dict shape parse_check_file
+    produces, so they flow through the existing run_check/write_result/handle_asana
+    pipeline unchanged. Check IDs are derived (table + check type), not manually
+    assigned — the registry has no DQ-NNN-style numbering to keep in sync."""
+    checks = []
+    for obj in registry_objects:
+        short_name = obj["name"].split(".")[-1].upper()
+        for check in obj["checks"]:
+            check_type = check["check_type"]
+            depends_on = check.get("depends_on", [])
+            checks.append(
+                {
+                    "id": f"T1-{check_type.upper()}-{short_name}",
+                    "title": f"{obj['name']} {check_type.replace('_', ' ')}",
+                    "severity": check["severity"].strip().lower(),
+                    "guards_bug": None,
+                    "known_failing": check.get("known_failing", False),
+                    "existing_asana_task": check.get("existing_asana_task"),
+                    "description": check.get("notes", "").strip()
+                    or f"Tier 1 registry-driven check ({check_type}) for {obj['name']}.",
+                    "sql": build_tier1_check_sql(check_type, obj["name"], depends_on),
+                    "path": None,
+                }
+            )
+    return apply_filters(checks, only, severity)
 
 
 def get_connection():
@@ -128,6 +200,46 @@ def ensure_results_table(cursor):
         ) USING DELTA
         """
     )
+
+
+def ensure_registry_table(cursor):
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS genealogy.ref_data_quality_registry (
+          object_name STRING,
+          object_type STRING,
+          check_type STRING,
+          depends_on STRING,
+          severity STRING,
+          known_failing BOOLEAN,
+          existing_asana_task STRING,
+          notes STRING
+        ) USING DELTA
+        """
+    )
+
+
+def sync_registry_table(cursor, registry_objects):
+    """Re-sync genealogy.ref_data_quality_registry from the checked-in YAML —
+    the Delta table is a queryable materialization (same pattern as
+    ref_signal_weights), not something edited live; git is authoritative."""
+    cursor.execute("DELETE FROM genealogy.ref_data_quality_registry")
+    for obj in registry_objects:
+        for check in obj["checks"]:
+            depends_on = ",".join(check.get("depends_on", [])) or None
+            cursor.execute(
+                f"""
+                INSERT INTO genealogy.ref_data_quality_registry
+                (object_name, object_type, check_type, depends_on, severity,
+                 known_failing, existing_asana_task, notes)
+                VALUES (
+                  {sql_literal(obj['name'])}, {sql_literal(obj['type'])},
+                  {sql_literal(check['check_type'])}, {sql_literal(depends_on)},
+                  {sql_literal(check['severity'])}, {sql_literal(check.get('known_failing', False))},
+                  {sql_literal(check.get('existing_asana_task'))}, {sql_literal(check.get('notes'))}
+                )
+                """
+            )
 
 
 def json_default(value):
@@ -281,11 +393,16 @@ def handle_asana(check, run_id, violation_count, sample_violations):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--only", help="Comma-separated list of check IDs to run, e.g. DQ-001,DQ-006")
+    parser.add_argument(
+        "--only", help="Comma-separated list of check IDs to run, e.g. DQ-001,DQ-006 or T1-ROW_COUNT_NOT_ZERO-GOLD_EVENT"
+    )
     parser.add_argument("--severity", help="Only run checks of this severity (critical|warning|info)")
     args = parser.parse_args()
 
-    checks = load_checks(only=args.only, severity=args.severity)
+    registry_objects = load_registry_seed()
+    checks = load_file_checks(only=args.only, severity=args.severity) + build_tier1_checks(
+        registry_objects, only=args.only, severity=args.severity
+    )
     if not checks:
         print("No checks matched the given filters.", file=sys.stderr)
         sys.exit(1)
@@ -294,6 +411,8 @@ def main():
     conn = get_connection()
     cursor = conn.cursor()
     ensure_results_table(cursor)
+    ensure_registry_table(cursor)
+    sync_registry_table(cursor, registry_objects)
 
     results = []
     for check in checks:

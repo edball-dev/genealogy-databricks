@@ -1,0 +1,256 @@
+# Tier 1 (generic, config-driven) check registry — Phase 1 of the Data
+# Quality Test Plan (Notion §9a/§10/§11). This is the checked-in source of
+# truth; genealogy.ref_data_quality_registry is a queryable Delta
+# materialization of it, synced on every run.py execution (see
+# sync_registry_table in run_checks.py) — same "config lives in ref_*
+# tables" pattern as ref_signal_weights, but git stays authoritative so
+# changes go through PR review like everything else here.
+#
+# Scope: the full gold layer, per §8/§10 — all 26 gold_* objects live in
+# workspace.genealogy as of 2026-09-14 (13 MANAGED Delta tables, 13 VIEWs).
+# Per §8, gold-layer Tier 1 checks are row-count-not-zero and freshness vs.
+# the tables a gold table is built from — NOT not-null/uniqueness (that's
+# the Silver-layer job, Phase 2). Severity defaults per §11 (confirmed by
+# Ed 2026-09-14): critical for row-count-not-zero, warning for freshness.
+#
+# Freshness mechanism: compares `DESCRIBE HISTORY <table>` last-write
+# timestamps (works for any managed Delta table — no dependency on a
+# table having its own refreshed_at column). This does NOT work on views
+# (no Delta log), so `depends_on` never names a view — where a real
+# dependency is a view, it's traced to its own nearest managed-table
+# ancestors instead (or omitted with a note where that would go too many
+# hops deep for this pass). Lineage below was read directly from this
+# repo's build notebooks (07_materialise_gold_tables.ipynb,
+# 08_generate_ancestral_depth_and_proximity.ipynb, notebook_dna_gold.ipynb,
+# notebook_01_document_matching.ipynb, notebook_B_person_signals.ipynb,
+# notebook_scores_snapshot.ipynb) and validated live — every check below
+# was run against workspace.genealogy on 2026-09-14 and passes today.
+#
+# object.type: table (MANAGED Delta) | view
+# check.check_type: row_count_not_zero | freshness_vs_source
+# check.depends_on: only for freshness_vs_source — managed table names
+#   (silver_* or gold_managed) this object should never be older than.
+
+objects:
+  # ---- MANAGED gold tables ----
+  - name: genealogy.gold_ancestral_proximity
+    type: table
+    checks:
+      - check_type: row_count_not_zero
+        severity: critical
+      - check_type: freshness_vs_source
+        severity: warning
+        depends_on: [genealogy.gold_generation_depth, genealogy.silver_relationship]
+
+  - name: genealogy.gold_dna_coverage
+    type: table
+    checks:
+      - check_type: row_count_not_zero
+        severity: critical
+      - check_type: freshness_vs_source
+        severity: warning
+        depends_on: [genealogy.gold_ancestral_proximity, genealogy.gold_person_dna]
+        notes: >
+          gold_dna_coverage also reads gold_person_branch (a VIEW) directly
+          per 07_materialise_gold_tables.ipynb — omitted from depends_on
+          since DESCRIBE HISTORY doesn't apply to views. gold_person_branch's
+          own managed ancestors (gold_ancestral_proximity, gold_generation_depth)
+          are already covered by their own registry entries below.
+
+  - name: genealogy.gold_fact_comparison
+    type: table
+    checks:
+      - check_type: row_count_not_zero
+        severity: critical
+        notes: >
+          Freshness deferred: this table's actual population statement
+          (CREATE OR REPLACE / INSERT OVERWRITE / DataFrame write) wasn't
+          found in any notebook in this repo — only its CREATE TABLE IF NOT
+          EXISTS DDL (07_materialise_gold_tables.ipynb) and downstream reads
+          (notebook_B_person_signals.ipynb). Needs tracing to whatever
+          notebook actually writes it before a freshness check can name a
+          correct depends_on.
+
+  - name: genealogy.gold_generation_depth
+    type: table
+    checks:
+      - check_type: row_count_not_zero
+        severity: critical
+      - check_type: freshness_vs_source
+        severity: warning
+        depends_on: [genealogy.silver_relationship]
+
+  - name: genealogy.gold_person_dna
+    type: table
+    checks:
+      - check_type: row_count_not_zero
+        severity: critical
+      - check_type: freshness_vs_source
+        severity: warning
+        depends_on: [genealogy.silver_person_tag, genealogy.silver_tag, genealogy.silver_person_source]
+
+  - name: genealogy.gold_person_event_timeline
+    type: table
+    checks:
+      - check_type: row_count_not_zero
+        severity: critical
+      - check_type: freshness_vs_source
+        severity: warning
+        depends_on:
+          [genealogy.silver_person, genealogy.silver_person_name, genealogy.silver_event, genealogy.silver_event_participant]
+
+  - name: genealogy.gold_research_action
+    type: table
+    checks:
+      - check_type: row_count_not_zero
+        severity: critical
+        notes: >
+          Static, hand-maintained reference list (populated via a literal
+          INSERT ... VALUES in 07_materialise_gold_tables.ipynb, not derived
+          from silver) — no freshness concept applies, same as a ref_* table.
+
+  - name: genealogy.gold_research_person_signals
+    type: table
+    checks:
+      - check_type: row_count_not_zero
+        severity: critical
+      - check_type: freshness_vs_source
+        severity: warning
+        depends_on: [genealogy.gold_person_event_timeline, genealogy.gold_fact_comparison]
+        notes: >
+          Also reads gold_person_life and gold_person_evidence_summary
+          (both VIEWs, per notebook_B_person_signals.ipynb) — omitted from
+          depends_on for the same view-lineage reason as gold_dna_coverage.
+
+  - name: genealogy.gold_research_signal_action
+    type: table
+    checks:
+      - check_type: row_count_not_zero
+        severity: critical
+        notes: Static config table (INSERT ... VALUES), same as gold_research_action.
+
+  - name: genealogy.gold_scores_snapshot_branch
+    type: table
+    checks:
+      - check_type: row_count_not_zero
+        severity: critical
+        notes: >
+          Append-only historical snapshot (one INSERT per scheduled run, per
+          notebook_scores_snapshot.ipynb) — "freshness vs source" doesn't fit
+          an ever-growing log the same way it fits a CREATE-OR-REPLACE gold
+          table. The right check here is "did today's snapshot get written",
+          not built yet — flagged as Phase 1 follow-up, not shipped blind.
+
+  - name: genealogy.gold_scores_snapshot_person
+    type: table
+    checks:
+      - check_type: row_count_not_zero
+        severity: critical
+        notes: Same append-only-snapshot caveat as gold_scores_snapshot_branch.
+
+  - name: genealogy.gold_source_coverage
+    type: table
+    checks:
+      - check_type: row_count_not_zero
+        severity: critical
+      - check_type: freshness_vs_source
+        severity: warning
+        depends_on: [genealogy.silver_event_participant]
+        notes: >
+          Partial lineage: notebook_01_document_matching.ipynb's citations
+          CTE likely also reads silver_person_source/silver_source, not yet
+          fully confirmed — silver_event_participant is the confirmed root
+          (event_person CTE) and a reasonable proxy in the meantime.
+
+  - name: genealogy.gold_transcript_facts
+    type: table
+    checks:
+      - check_type: row_count_not_zero
+        severity: critical
+        notes: >
+          Freshness deferred, same reasoning as gold_fact_comparison: only a
+          sync step against silver_document_person was found
+          (notebook_01_document_matching.ipynb), not the actual Gemini/OCR
+          extraction notebook that first populates this table.
+
+  # ---- gold VIEWs (row-count only — a view has no independent
+  # materialization/freshness of its own; it recomputes from its current
+  # dependencies on every query, so DESCRIBE HISTORY doesn't apply and
+  # "freshness" isn't a coherent concept here) ----
+  - name: genealogy.gold_ancestor_coverage
+    type: view
+    checks:
+      - check_type: row_count_not_zero
+        severity: critical
+
+  - name: genealogy.gold_branch_scores
+    type: view
+    checks:
+      - check_type: row_count_not_zero
+        severity: critical
+
+  - name: genealogy.gold_branch_structural_metrics
+    type: view
+    checks:
+      - check_type: row_count_not_zero
+        severity: critical
+
+  - name: genealogy.gold_event
+    type: view
+    checks:
+      - check_type: row_count_not_zero
+        severity: critical
+
+  - name: genealogy.gold_person_branch
+    type: view
+    checks:
+      - check_type: row_count_not_zero
+        severity: critical
+
+  - name: genealogy.gold_person_evidence_summary
+    type: view
+    checks:
+      - check_type: row_count_not_zero
+        severity: critical
+
+  - name: genealogy.gold_person_fact_summary
+    type: view
+    checks:
+      - check_type: row_count_not_zero
+        severity: critical
+
+  - name: genealogy.gold_person_life
+    type: view
+    checks:
+      - check_type: row_count_not_zero
+        severity: critical
+
+  - name: genealogy.gold_person_scores
+    type: view
+    checks:
+      - check_type: row_count_not_zero
+        severity: critical
+
+  - name: genealogy.gold_person_signal_scores
+    type: view
+    checks:
+      - check_type: row_count_not_zero
+        severity: critical
+
+  - name: genealogy.gold_story_candidates_by_branch
+    type: view
+    checks:
+      - check_type: row_count_not_zero
+        severity: critical
+
+  - name: genealogy.gold_story_pipeline
+    type: view
+    checks:
+      - check_type: row_count_not_zero
+        severity: critical
+
+  - name: genealogy.gold_story_plan_people
+    type: view
+    checks:
+      - check_type: row_count_not_zero
+        severity: critical
