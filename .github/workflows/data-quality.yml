@@ -1,0 +1,33 @@
+name: Data Quality
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  data-quality:
+    runs-on: ubuntu-latest
+    # Secrets (DATABRICKS_HOST, DATABRICKS_TOKEN, DATABRICKS_WAREHOUSE,
+    # ASANA_PAT) live in the "production" GitHub environment, not as repo
+    # secrets — a job must declare that environment to see them.
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: tests/data_quality/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r tests/data_quality/requirements.txt
+
+      - name: Run data quality checks
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+          DATABRICKS_WAREHOUSE: ${{ secrets.DATABRICKS_WAREHOUSE }}
+          ASANA_PAT: ${{ secrets.ASANA_PAT }}
+        run: python tests/data_quality/run_checks.py
