@@ -5,13 +5,15 @@ Two check-authoring sources feed the same execution path:
 - Tier 2: hand-written checks/*.sql files, each a SELECT that returns
   violating rows (zero rows = pass) — business rules, aggregate
   reconciliation, regression guards.
-- Tier 1: registry/tier1_gold_registry.yaml, a config-driven registry of
-  generic checks (row-count-not-zero, freshness-vs-source) generated into
-  the same SELECT-returns-violations shape. See
-  tests/data_quality/README.md for both formats.
+- Tier 1: registry/tier1_*.yaml (one file per layer — tier1_gold_registry.yaml
+  from Phase 1, tier1_silver_registry.yaml from Phase 2), a config-driven
+  registry of generic checks generated into the same SELECT-returns-violations
+  shape. Gold check types: row_count_not_zero, freshness_vs_source. Silver
+  check types: not_null, uniqueness, fk_integrity. See
+  tests/data_quality/README.md for all formats.
 
 Every run syncs genealogy.ref_data_quality_registry from the checked-in
-YAML (git is the source of truth; the Delta table is a queryable
+YAML files (git is the source of truth; the Delta table is a queryable
 materialization, same pattern as ref_signal_weights), writes one row per
 check to genealogy.data_quality_results, and a newly-failing critical
 check files (or reuses) an Asana task.
@@ -31,7 +33,7 @@ import yaml
 from databricks import sql
 
 CHECKS_DIR = Path(__file__).parent / "checks"
-REGISTRY_SEED_PATH = Path(__file__).parent / "registry" / "tier1_gold_registry.yaml"
+REGISTRY_DIR = Path(__file__).parent / "registry"
 SAMPLE_CAP = 20
 
 ASANA_API = "https://app.asana.com/api/1.0"
@@ -108,14 +110,19 @@ def load_file_checks(only=None, severity=None):
 
 
 def load_registry_seed():
-    return yaml.safe_load(REGISTRY_SEED_PATH.read_text())["objects"]
+    """Load and merge every registry/tier1_*.yaml file's objects into one list."""
+    objects = []
+    for path in sorted(REGISTRY_DIR.glob("tier1_*.yaml")):
+        objects.extend(yaml.safe_load(path.read_text())["objects"])
+    return objects
 
 
-def build_tier1_check_sql(check_type, object_name, depends_on):
+def build_tier1_check_sql(check_type, object_name, check_cfg):
     if check_type == "row_count_not_zero":
         return f"SELECT 'EMPTY_TABLE' AS violation FROM (SELECT COUNT(*) AS n FROM {object_name}) t WHERE t.n = 0"
 
     if check_type == "freshness_vs_source":
+        depends_on = check_cfg.get("depends_on", [])
         source_union = "\n    UNION ALL\n    ".join(
             f"SELECT timestamp AS ts FROM (DESCRIBE HISTORY {src})" for src in depends_on
         )
@@ -133,31 +140,66 @@ def build_tier1_check_sql(check_type, object_name, depends_on):
             "WHERE target.last_write < source.last_write"
         )
 
+    if check_type == "not_null":
+        column = check_cfg["column"]
+        return f"SELECT * FROM {object_name} WHERE {column} IS NULL"
+
+    if check_type == "uniqueness":
+        columns = ", ".join(check_cfg["columns"])
+        return (
+            f"SELECT {columns}, COUNT(*) AS dupe_count FROM {object_name} "
+            f"GROUP BY {columns} HAVING COUNT(*) > 1"
+        )
+
+    if check_type == "fk_integrity":
+        column = check_cfg["column"]
+        ref_table = check_cfg["ref_table"]
+        ref_column = check_cfg["ref_column"]
+        return (
+            f"SELECT DISTINCT {column} FROM {object_name} t "
+            f"WHERE t.{column} IS NOT NULL AND NOT EXISTS "
+            f"(SELECT 1 FROM {ref_table} r WHERE r.{ref_column} = t.{column})"
+        )
+
     raise ValueError(f"unknown Tier 1 check_type: {check_type}")
+
+
+def tier1_check_label(check_type, check_cfg):
+    """Column/key description used in the derived check id and title."""
+    if check_type == "not_null":
+        return check_cfg["column"]
+    if check_type == "uniqueness":
+        return "_".join(check_cfg["columns"])
+    if check_type == "fk_integrity":
+        return check_cfg["column"]
+    return None
 
 
 def build_tier1_checks(registry_objects, only=None, severity=None):
     """Generate Tier 1 registry checks into the same dict shape parse_check_file
     produces, so they flow through the existing run_check/write_result/handle_asana
-    pipeline unchanged. Check IDs are derived (table + check type), not manually
-    assigned — the registry has no DQ-NNN-style numbering to keep in sync."""
+    pipeline unchanged. Check IDs are derived (table + check type [+ column]),
+    not manually assigned — the registry has no DQ-NNN-style numbering to keep
+    in sync."""
     checks = []
     for obj in registry_objects:
         short_name = obj["name"].split(".")[-1].upper()
         for check in obj["checks"]:
             check_type = check["check_type"]
-            depends_on = check.get("depends_on", [])
+            label = tier1_check_label(check_type, check)
+            id_suffix = f"-{label.upper()}" if label else ""
+            title_suffix = f" ({label})" if label else ""
             checks.append(
                 {
-                    "id": f"T1-{check_type.upper()}-{short_name}",
-                    "title": f"{obj['name']} {check_type.replace('_', ' ')}",
+                    "id": f"T1-{check_type.upper()}-{short_name}{id_suffix}",
+                    "title": f"{obj['name']} {check_type.replace('_', ' ')}{title_suffix}",
                     "severity": check["severity"].strip().lower(),
                     "guards_bug": None,
                     "known_failing": check.get("known_failing", False),
                     "existing_asana_task": check.get("existing_asana_task"),
                     "description": check.get("notes", "").strip()
                     or f"Tier 1 registry-driven check ({check_type}) for {obj['name']}.",
-                    "sql": build_tier1_check_sql(check_type, obj["name"], depends_on),
+                    "sql": build_tier1_check_sql(check_type, obj["name"], check),
                     "path": None,
                 }
             )
@@ -209,7 +251,11 @@ def ensure_registry_table(cursor):
           object_name STRING,
           object_type STRING,
           check_type STRING,
+          column_name STRING,
+          columns STRING,
           depends_on STRING,
+          ref_table STRING,
+          ref_column STRING,
           severity STRING,
           known_failing BOOLEAN,
           existing_asana_task STRING,
@@ -217,6 +263,22 @@ def ensure_registry_table(cursor):
         ) USING DELTA
         """
     )
+    # Phase 1 created this table without column_name/columns/ref_table/ref_column
+    # (Phase 2 additions, for the silver not_null/uniqueness/fk_integrity check
+    # shapes) — CREATE TABLE IF NOT EXISTS is a no-op on an existing table, so
+    # backfill any columns an earlier run didn't create.
+    cursor.execute("DESCRIBE TABLE genealogy.ref_data_quality_registry")
+    existing_columns = {row[0] for row in cursor.fetchall()}
+    additions = {
+        "column_name": "STRING",
+        "columns": "STRING",
+        "ref_table": "STRING",
+        "ref_column": "STRING",
+    }
+    missing = {name: type_ for name, type_ in additions.items() if name not in existing_columns}
+    if missing:
+        cols_sql = ", ".join(f"{name} {type_}" for name, type_ in missing.items())
+        cursor.execute(f"ALTER TABLE genealogy.ref_data_quality_registry ADD COLUMNS ({cols_sql})")
 
 
 def sync_registry_table(cursor, registry_objects):
@@ -226,15 +288,18 @@ def sync_registry_table(cursor, registry_objects):
     cursor.execute("DELETE FROM genealogy.ref_data_quality_registry")
     for obj in registry_objects:
         for check in obj["checks"]:
+            columns = ",".join(check.get("columns", [])) or None
             depends_on = ",".join(check.get("depends_on", [])) or None
             cursor.execute(
                 f"""
                 INSERT INTO genealogy.ref_data_quality_registry
-                (object_name, object_type, check_type, depends_on, severity,
-                 known_failing, existing_asana_task, notes)
+                (object_name, object_type, check_type, column_name, columns, depends_on,
+                 ref_table, ref_column, severity, known_failing, existing_asana_task, notes)
                 VALUES (
                   {sql_literal(obj['name'])}, {sql_literal(obj['type'])},
-                  {sql_literal(check['check_type'])}, {sql_literal(depends_on)},
+                  {sql_literal(check['check_type'])}, {sql_literal(check.get('column'))},
+                  {sql_literal(columns)}, {sql_literal(depends_on)},
+                  {sql_literal(check.get('ref_table'))}, {sql_literal(check.get('ref_column'))},
                   {sql_literal(check['severity'])}, {sql_literal(check.get('known_failing', False))},
                   {sql_literal(check.get('existing_asana_task'))}, {sql_literal(check.get('notes'))}
                 )

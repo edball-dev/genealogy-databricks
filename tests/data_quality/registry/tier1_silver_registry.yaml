@@ -1,0 +1,606 @@
+# Tier 1 (generic, config-driven) check registry — Phase 2 of the Data
+# Quality Test Plan (Notion §8/§10/§11). Same pattern as
+# tier1_gold_registry.yaml (Phase 1): this YAML is the checked-in source of
+# truth, genealogy.ref_data_quality_registry is a queryable Delta
+# materialization of it, synced on every run_checks.py run.
+#
+# Scope: the silver layer, per §8 — "Full: not-null, uniqueness, FK
+# integrity against bronze and other silver tables... heaviest layer by
+# design, most real bugs are introduced in silver transformations."
+# 28 MANAGED silver_* tables confirmed live in workspace.genealogy on
+# 2026-09-14 (list_tables + describe_table). Two objects deliberately
+# excluded:
+#   - silver_v_active_place_canonical (VIEW, a plain `WHERE is_active`
+#     filter over silver_place_canonical) — covered by checks on the base
+#     table, same "a view is never independently stale/broken" reasoning
+#     as Phase 1's gold views.
+#   - silver_article_chunk_index (FOREIGN table) — the article-resource-search
+#     skill explicitly documents this as a dead/retired table from a
+#     retired OCR/vector pipeline. Not queried at all, per that skill.
+#
+# Severity defaults (not yet confirmed by Ed — proposed here, same posture
+# as Phase 1's gold defaults before they were confirmed): critical for
+# not_null and uniqueness (structural integrity), warning for fk_integrity
+# (a dangling reference is real but every FK checked below currently
+# resolves cleanly — 0 orphans live — so warning vs critical is lower
+# stakes right now than it would be if any were already failing).
+#
+# Every check below was run against workspace.genealogy on 2026-09-14
+# before being added — not_null and fk_integrity individually, uniqueness
+# via direct GROUP BY (an earlier CONCAT-based batch validation technique
+# produced false positives from NULL-swallowing CONCAT and was discarded —
+# see tests/data_quality/README.md's Tier 1 section for the pitfall).
+#
+# Two genuine, live data findings surfaced building this registry (not
+# check-design bugs — confirmed by tracing root cause, see
+# failing-check-triage skill):
+#   1. silver_relationship / silver_event_participant: 8 duplicate
+#      (parent, child) pairs, each via two different family_gedcom_id
+#      records for what's almost certainly the same real person duplicated
+#      in the source GEDCOM (concrete example traced: child @I332693890337@
+#      linked to two "different" fathers, @I332693890249@ and
+#      @I332693890365@, both married to the same wife). Filed as Asana task
+#      1218472474949479 (Data section); shipped as known_failing against it.
+#   2. silver_event_source.source_xref / silver_person_source.source_xref:
+#      169 and 180 NULL respectively (out of 52715 / 18636), plus 1 row
+#      with person_gedcom_id also NULL in silver_person_source. All sampled
+#      rows have citation_page/text/date also NULL — looks like near-empty
+#      citation stubs, but root cause (a GEDCOM inline-citation style vs. a
+#      genuine extraction gap in 03b_generate_sources.ipynb) wasn't fully
+#      confirmed within this pass. Shipped as known_failing with the live
+#      counts recorded in `notes` rather than guessing a root cause or
+#      silently excluding the check — flagged as needing further triage,
+#      not closed out.
+#
+# check.check_type: not_null | uniqueness | fk_integrity
+#   not_null:      column
+#   uniqueness:    columns (list — composite keys supported)
+#   fk_integrity:  column, ref_table, ref_column
+
+objects:
+  - name: genealogy.silver_person
+    type: table
+    checks:
+      - check_type: not_null
+        column: person_gedcom_id
+        severity: critical
+      - check_type: uniqueness
+        columns: [person_gedcom_id]
+        severity: critical
+
+  - name: genealogy.silver_person_name
+    type: table
+    checks:
+      - check_type: not_null
+        column: person_gedcom_id
+        severity: critical
+      - check_type: uniqueness
+        columns: [person_gedcom_id]
+        severity: critical
+      - check_type: fk_integrity
+        column: person_gedcom_id
+        ref_table: genealogy.silver_person
+        ref_column: person_gedcom_id
+        severity: warning
+
+  - name: genealogy.silver_person_alias
+    type: table
+    checks:
+      - check_type: not_null
+        column: person_gedcom_id
+        severity: critical
+      - check_type: fk_integrity
+        column: person_gedcom_id
+        ref_table: genealogy.silver_person
+        ref_column: person_gedcom_id
+        severity: warning
+        notes: >
+          No uniqueness check: a person can legitimately have multiple
+          aliases (married name, father-surname, manually curated
+          document-name/surname-variant entries) — one row per alias is
+          the correct shape, not a natural key candidate.
+
+  - name: genealogy.silver_person_source
+    type: table
+    checks:
+      - check_type: not_null
+        column: person_gedcom_id
+        severity: critical
+        known_failing: true
+        existing_asana_task: "1218472474949479"
+        notes: >
+          1 row with person_gedcom_id NULL (source_xref = literal
+          "Ancestry.com Family Trees", not a real @S xref) — a root-level
+          generic citation not attributable to a specific person. Grouped
+          with the source_xref finding below under the same task pending
+          fuller root-cause triage.
+      - check_type: not_null
+        column: source_xref
+        severity: critical
+        known_failing: true
+        existing_asana_task: "1218472474949479"
+        notes: >
+          180 of 18636 rows have source_xref NULL (citation_page/text/date
+          also NULL on every sampled row — near-empty citation stubs).
+          Root cause not fully confirmed: could be a valid GEDCOM
+          inline-citation style, or a gap in 03b_generate_sources.ipynb's
+          extraction. Flagged for further triage, not closed out.
+      - check_type: uniqueness
+        columns: [person_gedcom_id, source_xref, citation_root_line_no]
+        severity: critical
+      - check_type: fk_integrity
+        column: person_gedcom_id
+        ref_table: genealogy.silver_person
+        ref_column: person_gedcom_id
+        severity: warning
+      - check_type: fk_integrity
+        column: source_xref
+        ref_table: genealogy.silver_source
+        ref_column: record_xref
+        severity: warning
+
+  - name: genealogy.silver_person_story_status
+    type: table
+    checks:
+      - check_type: not_null
+        column: person_gedcom_id
+        severity: critical
+      - check_type: not_null
+        column: story_written
+        severity: critical
+      - check_type: uniqueness
+        columns: [person_gedcom_id]
+        severity: critical
+      - check_type: fk_integrity
+        column: person_gedcom_id
+        ref_table: genealogy.silver_person
+        ref_column: person_gedcom_id
+        severity: warning
+
+  - name: genealogy.silver_person_tag
+    type: table
+    checks:
+      - check_type: not_null
+        column: person_gedcom_id
+        severity: critical
+      - check_type: not_null
+        column: tag_gedcom_id
+        severity: critical
+      - check_type: uniqueness
+        columns: [person_gedcom_id, tag_gedcom_id]
+        severity: critical
+      - check_type: fk_integrity
+        column: person_gedcom_id
+        ref_table: genealogy.silver_person
+        ref_column: person_gedcom_id
+        severity: warning
+      - check_type: fk_integrity
+        column: tag_gedcom_id
+        ref_table: genealogy.silver_tag
+        ref_column: tag_gedcom_id
+        severity: warning
+
+  - name: genealogy.silver_relationship
+    type: table
+    checks:
+      - check_type: not_null
+        column: person_id_1
+        severity: critical
+      - check_type: not_null
+        column: person_id_2
+        severity: critical
+      - check_type: not_null
+        column: relationship_type
+        severity: critical
+      - check_type: uniqueness
+        columns: [person_id_1, person_id_2, relationship_type]
+        severity: critical
+        known_failing: true
+        existing_asana_task: "1218472474949479"
+        notes: >
+          8 duplicate (parent, child) pairs, each via two different
+          family_gedcom_id records — traced to duplicate family/person
+          records in the source GEDCOM, not a bug in this table's own
+          build logic (04_process_silver_tables.ipynb). See task notes for
+          the concrete example and full list of affected pairs.
+      - check_type: fk_integrity
+        column: person_id_1
+        ref_table: genealogy.silver_person
+        ref_column: person_gedcom_id
+        severity: warning
+      - check_type: fk_integrity
+        column: person_id_2
+        ref_table: genealogy.silver_person
+        ref_column: person_gedcom_id
+        severity: warning
+
+  - name: genealogy.silver_family
+    type: table
+    checks:
+      - check_type: not_null
+        column: family_gedcom_id
+        severity: critical
+      - check_type: uniqueness
+        columns: [family_gedcom_id]
+        severity: critical
+      - check_type: fk_integrity
+        column: husband_gedcom_id
+        ref_table: genealogy.silver_person
+        ref_column: person_gedcom_id
+        severity: warning
+      - check_type: fk_integrity
+        column: wife_gedcom_id
+        ref_table: genealogy.silver_person
+        ref_column: person_gedcom_id
+        severity: warning
+
+  - name: genealogy.silver_family_child
+    type: table
+    checks:
+      - check_type: not_null
+        column: family_gedcom_id
+        severity: critical
+      - check_type: not_null
+        column: child_gedcom_id
+        severity: critical
+      - check_type: uniqueness
+        columns: [family_gedcom_id, child_gedcom_id]
+        severity: critical
+      - check_type: fk_integrity
+        column: family_gedcom_id
+        ref_table: genealogy.silver_family
+        ref_column: family_gedcom_id
+        severity: warning
+      - check_type: fk_integrity
+        column: child_gedcom_id
+        ref_table: genealogy.silver_person
+        ref_column: person_gedcom_id
+        severity: warning
+
+  - name: genealogy.silver_gps_assessment
+    type: table
+    checks:
+      - check_type: not_null
+        column: assessment_id
+        severity: critical
+      - check_type: uniqueness
+        columns: [assessment_id]
+        severity: critical
+        notes: >
+          assessment_id is documented (column comment) as "UUID, primary
+          key". Table has 0 rows as of 2026-09-14 — not yet used, populated
+          ad hoc via the gra skill rather than any notebook in this repo.
+      - check_type: fk_integrity
+        column: primary_gedcom_id
+        ref_table: genealogy.silver_person
+        ref_column: person_gedcom_id
+        severity: warning
+
+  - name: genealogy.silver_gps_assessment_source
+    type: table
+    checks:
+      - check_type: not_null
+        column: assessment_id
+        severity: critical
+      - check_type: uniqueness
+        columns: [assessment_id, source_seq]
+        severity: critical
+      - check_type: fk_integrity
+        column: assessment_id
+        ref_table: genealogy.silver_gps_assessment
+        ref_column: assessment_id
+        severity: warning
+
+  - name: genealogy.silver_place_canonical
+    type: table
+    checks:
+      - check_type: not_null
+        column: canonical_place_id
+        severity: critical
+      - check_type: not_null
+        column: place_normalised
+        severity: critical
+      - check_type: uniqueness
+        columns: [canonical_place_id]
+        severity: critical
+
+  - name: genealogy.silver_place_variant
+    type: table
+    checks:
+      - check_type: not_null
+        column: place_variant_id
+        severity: critical
+      - check_type: not_null
+        column: place_raw
+        severity: critical
+      - check_type: uniqueness
+        columns: [place_variant_id]
+        severity: critical
+      - check_type: fk_integrity
+        column: canonical_place_id
+        ref_table: genealogy.silver_place_canonical
+        ref_column: canonical_place_id
+        severity: warning
+
+  - name: genealogy.silver_place_merge_log
+    type: table
+    checks:
+      - check_type: not_null
+        column: source_canonical_id
+        severity: critical
+      - check_type: not_null
+        column: target_canonical_id
+        severity: critical
+      - check_type: fk_integrity
+        column: source_canonical_id
+        ref_table: genealogy.silver_place_canonical
+        ref_column: canonical_place_id
+        severity: warning
+      - check_type: fk_integrity
+        column: target_canonical_id
+        ref_table: genealogy.silver_place_canonical
+        ref_column: canonical_place_id
+        severity: warning
+        notes: >
+          No uniqueness check: append-only audit log written by
+          merge_place_canonicals() in lib_helper_utils.ipynb — a source
+          canonical could in principle be logged more than once if merge
+          history needed correcting, so repeated rows aren't inherently
+          invalid the way they would be for an entity table.
+
+  - name: genealogy.silver_event
+    type: table
+    checks:
+      - check_type: not_null
+        column: event_id
+        severity: critical
+      - check_type: not_null
+        column: event_type
+        severity: critical
+      - check_type: not_null
+        column: record_xref
+        severity: critical
+      - check_type: uniqueness
+        columns: [event_id]
+        severity: critical
+        notes: >
+          No FK check on record_xref: it polymorphically references either
+          silver_person.person_gedcom_id (@I...) or
+          silver_family.family_gedcom_id (@F...) depending on event_type —
+          the generic single-ref_table fk_integrity check type can't
+          express an OR across two tables. Out of scope for a generic
+          registry entry; would need a bespoke Tier 2 check if this ever
+          needs enforcing.
+
+  - name: genealogy.silver_event_date
+    type: table
+    checks:
+      - check_type: not_null
+        column: event_id
+        severity: critical
+      - check_type: uniqueness
+        columns: [event_id]
+        severity: critical
+      - check_type: fk_integrity
+        column: event_id
+        ref_table: genealogy.silver_event
+        ref_column: event_id
+        severity: warning
+
+  - name: genealogy.silver_event_participant
+    type: table
+    checks:
+      - check_type: not_null
+        column: event_id
+        severity: critical
+      - check_type: not_null
+        column: person_id
+        severity: critical
+      - check_type: uniqueness
+        columns: [event_id, person_id, role]
+        severity: critical
+        known_failing: true
+        existing_asana_task: "1218472474949479"
+        notes: >
+          10 duplicate rows, all role in (father, mother) — same root
+          cause as the silver_relationship duplicates (duplicate family
+          records in the source GEDCOM): this table's "derived"
+          father/mother rows come from the same
+          silver_family_child JOIN silver_family that produces the
+          relationship duplicates.
+      - check_type: fk_integrity
+        column: event_id
+        ref_table: genealogy.silver_event
+        ref_column: event_id
+        severity: warning
+      - check_type: fk_integrity
+        column: person_id
+        ref_table: genealogy.silver_person
+        ref_column: person_gedcom_id
+        severity: warning
+
+  - name: genealogy.silver_event_source
+    type: table
+    checks:
+      - check_type: not_null
+        column: event_id
+        severity: critical
+      - check_type: not_null
+        column: source_xref
+        severity: critical
+        known_failing: true
+        existing_asana_task: "1218472474949479"
+        notes: >
+          169 of 52715 rows have source_xref NULL (citation_page/text also
+          NULL on every sampled row) — same near-empty-citation-stub
+          pattern as silver_person_source.source_xref, same
+          not-fully-confirmed root cause. See that table's note.
+      - check_type: uniqueness
+        columns: [event_id, source_xref, citation_root_line_no]
+        severity: critical
+      - check_type: fk_integrity
+        column: event_id
+        ref_table: genealogy.silver_event
+        ref_column: event_id
+        severity: warning
+      - check_type: fk_integrity
+        column: source_xref
+        ref_table: genealogy.silver_source
+        ref_column: record_xref
+        severity: warning
+
+  - name: genealogy.silver_document_person
+    type: table
+    checks:
+      - check_type: not_null
+        column: file_id
+        severity: critical
+        notes: Delta-enforced NOT NULL in the table's own DDL (notebook_01_document_matching.ipynb).
+      - check_type: not_null
+        column: person_gedcom_id
+        severity: critical
+        notes: Delta-enforced NOT NULL, same DDL.
+      - check_type: uniqueness
+        columns: [file_id, person_gedcom_id]
+        severity: critical
+        notes: >
+          Composite key, not file_id alone — a household/multi-person
+          document legitimately matches more than one person_gedcom_id
+          per file_id (see the "household document matching gap" backlog
+          item, Test Plan §3, Asana 1218420653379642).
+      - check_type: fk_integrity
+        column: person_gedcom_id
+        ref_table: genealogy.silver_person
+        ref_column: person_gedcom_id
+        severity: warning
+
+  - name: genealogy.silver_document_person_override
+    type: table
+    checks:
+      - check_type: not_null
+        column: file_id
+        severity: critical
+        notes: Delta-enforced NOT NULL in the table's own DDL.
+      - check_type: not_null
+        column: person_gedcom_id
+        severity: critical
+        notes: Delta-enforced NOT NULL, same DDL.
+      - check_type: uniqueness
+        columns: [file_id, person_gedcom_id]
+        severity: critical
+      - check_type: fk_integrity
+        column: person_gedcom_id
+        ref_table: genealogy.silver_person
+        ref_column: person_gedcom_id
+        severity: warning
+        notes: >
+          Table is currently empty (0 rows) — expected, per its own
+          comment: overrides are added only for cases genuinely
+          unresolvable algorithmically. An empty table here is a healthy
+          state, not a gap, so no row-count check (unlike gold Tier 1).
+
+  - name: genealogy.silver_dna_match
+    type: table
+    checks:
+      - check_type: not_null
+        column: kit_id
+        severity: critical
+      - check_type: not_null
+        column: match_name
+        severity: critical
+      - check_type: uniqueness
+        columns: [kit_id, match_name]
+        severity: critical
+        notes: MERGE key confirmed directly from notebook_dna_load.ipynb's DeltaTable.merge() condition.
+
+  - name: genealogy.silver_object
+    type: table
+    checks:
+      - check_type: not_null
+        column: obj_category_gedcom_id
+        severity: critical
+      - check_type: uniqueness
+        columns: [obj_category_gedcom_id]
+        severity: critical
+
+  - name: genealogy.silver_object_link
+    type: table
+    checks:
+      - check_type: not_null
+        column: record_xref
+        severity: critical
+      - check_type: not_null
+        column: obj_gedcom_id
+        severity: critical
+      - check_type: uniqueness
+        columns: [record_xref, obj_gedcom_id, line_no]
+        severity: critical
+      - check_type: fk_integrity
+        column: obj_gedcom_id
+        ref_table: genealogy.silver_object
+        ref_column: obj_category_gedcom_id
+        severity: warning
+
+  - name: genealogy.silver_repository
+    type: table
+    checks:
+      - check_type: not_null
+        column: repo_gedcom_id
+        severity: critical
+      - check_type: uniqueness
+        columns: [repo_gedcom_id]
+        severity: critical
+
+  - name: genealogy.silver_source
+    type: table
+    checks:
+      - check_type: not_null
+        column: record_xref
+        severity: critical
+      - check_type: uniqueness
+        columns: [record_xref]
+        severity: critical
+
+  - name: genealogy.silver_story_plan_chapters
+    type: table
+    checks:
+      - check_type: not_null
+        column: chapter_number
+        severity: critical
+      - check_type: not_null
+        column: title
+        severity: critical
+      - check_type: uniqueness
+        columns: [chapter_number]
+        severity: critical
+        notes: >
+          Manually curated, full CREATE OR REPLACE rebuild per
+          story_plan_chapters_load_v1.ipynb ("re-run only when the Sixty
+          Stories plan doc changes") — no FK check on person_gedcom_ids
+          (an ARRAY<STRING>, would need an UNNEST-based check type this
+          registry doesn't have yet).
+
+  - name: genealogy.silver_tag
+    type: table
+    checks:
+      - check_type: not_null
+        column: tag_gedcom_id
+        severity: critical
+      - check_type: uniqueness
+        columns: [tag_gedcom_id]
+        severity: critical
+      - check_type: fk_integrity
+        column: tag_category_gedcom_id
+        ref_table: genealogy.silver_tag_category
+        ref_column: tag_category_gedcom_id
+        severity: warning
+
+  - name: genealogy.silver_tag_category
+    type: table
+    checks:
+      - check_type: not_null
+        column: tag_category_gedcom_id
+        severity: critical
+      - check_type: uniqueness
+        columns: [tag_category_gedcom_id]
+        severity: critical
