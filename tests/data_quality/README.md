@@ -183,12 +183,11 @@ skill). Three check types, in addition to the two gold ones above:
 | `uniqueness` | The combination of `columns` has no duplicate groups (`GROUP BY ... HAVING COUNT(*) > 1`). | `columns` (list — one column is fine as a single-item list) |
 | `fk_integrity` | Every non-null `column` value in this table exists as `ref_column` in `ref_table` (`NOT EXISTS` anti-join). | `column`, `ref_table`, `ref_column` |
 
-Severity defaults used in `tier1_silver_registry.yaml`: `critical` for
-`not_null` and `uniqueness`, `warning` for `fk_integrity` — proposed
-following the same reasoning as the gold defaults (a null/duplicate in a
-key column is a hard data-integrity break; an orphaned FK is usually
-recoverable/traceable and shouldn't block a run by itself). Confirm with Ed
-before treating these as as settled as the gold defaults were.
+Severity defaults (confirmed by Ed, 2026-09-14): `critical` for
+`not_null` and `uniqueness`, `warning` for `fk_integrity` — same reasoning
+as the gold defaults (a null/duplicate in a key column is a hard
+data-integrity break; an orphaned FK is usually recoverable/traceable and
+shouldn't block a run by itself).
 
 Keys and FK relationships were traced from each table's actual build
 notebook (`CREATE TABLE`/`MERGE`/`.saveAsTable()` statements, Delta `NOT

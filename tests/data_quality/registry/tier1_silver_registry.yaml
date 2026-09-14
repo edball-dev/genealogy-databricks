@@ -18,12 +18,11 @@
 #     skill explicitly documents this as a dead/retired table from a
 #     retired OCR/vector pipeline. Not queried at all, per that skill.
 #
-# Severity defaults (not yet confirmed by Ed — proposed here, same posture
-# as Phase 1's gold defaults before they were confirmed): critical for
-# not_null and uniqueness (structural integrity), warning for fk_integrity
-# (a dangling reference is real but every FK checked below currently
-# resolves cleanly — 0 orphans live — so warning vs critical is lower
-# stakes right now than it would be if any were already failing).
+# Severity defaults (confirmed by Ed, 2026-09-14): critical for not_null
+# and uniqueness (structural integrity — a null/duplicate is a broken
+# record), warning for fk_integrity (a dangling reference is usually
+# recoverable/traceable rather than corrupt — every FK checked below
+# currently resolves cleanly, 0 orphans live).
 #
 # Every check below was run against workspace.genealogy on 2026-09-14
 # before being added — not_null and fk_integrity individually, uniqueness
