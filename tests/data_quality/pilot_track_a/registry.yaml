@@ -1,0 +1,87 @@
+# Track A pilot: hand-rolled config-driven Tier 1 registry.
+#
+# Format chosen for the pilot: YAML file, not a ref_data_quality_registry Delta
+# table. Rationale (see spec §4): a YAML file is faster to iterate on during a
+# pilot — no DDL, no round-trip through the warehouse to change a check. If
+# Track A wins the pilot, the production version should move this into a
+# Delta table (ref_data_quality_registry) to match the project's existing
+# "config lives in ref_* tables" precedent (e.g. ref_signal_weights) and to
+# get audit history / access control for free — noted as follow-up work, not
+# done here, per the pilot's "don't build both" instruction.
+#
+# Each table entry lists:
+#   table              - fully-qualified table name
+#   not_null_columns   - columns that must never be NULL (generic Tier 1 check)
+#   duplicate_key       - column that must be unique (generic Tier 1 check),
+#                        or omitted if the table has no confirmed natural key
+#   custom_checks      - Tier 2 checks: hand-written SQL returning violating
+#                        rows, same contract as tests/data_quality/checks/*.sql
+#
+# known_failing / existing_asana_task mirror the header fields documented in
+# tests/data_quality/README.md — reused here rather than reinvented, since
+# this is exactly the semantics §3 of the pilot spec asks Track A to prove out.
+
+tables:
+  - table: genealogy.gold_dna_coverage
+    not_null_columns:
+      - column: branch
+        known_failing: false
+      - column: dna_matches_total
+        known_failing: false
+    duplicate_key: branch
+    custom_checks:
+      - id: PILOT-A-DNA-RECON
+        title: "gold_dna_coverage.dna_matches_total reconciliation (reproduces DQ-008)"
+        known_failing: true
+        existing_asana_task: "1218420159647669"
+        description: >
+          Per-branch dna_matches_total must equal a fresh COUNT(*) of 'DNA
+          Match' rows in gold_person_dna for that branch. Reproduces DQ-008
+          exactly (see tests/data_quality/checks/dq008_dna_matches_total_reconciliation.sql)
+          to test faithful reproduction of a known-correct check, not to
+          discover a new bug.
+        sql: |
+          SELECT c.branch, c.dna_matches_total AS reported_total, COUNT(*) AS recomputed_total
+          FROM genealogy.gold_dna_coverage c
+          LEFT JOIN genealogy.gold_person_dna d
+            ON d.branch = c.branch AND d.dna_role = 'DNA Match'
+          GROUP BY c.branch, c.dna_matches_total
+          HAVING c.dna_matches_total != COUNT(*)
+
+  - table: genealogy.gold_source_coverage
+    not_null_columns:
+      - column: event_id
+        known_failing: true
+        existing_asana_task: "1218420283884341"
+        description: >
+          All event_id values are currently NULL (open bug, DQ-004). This
+          check exists to prove the registry's known-failing path, not to
+          find a new issue.
+      - column: person_gedcom_id
+        known_failing: false
+    # No duplicate_key: spec §1 notes there's no confirmed single-column
+    # natural key on this table (event_id is a candidate but is 100% NULL
+    # right now, tracked separately) — deliberately not forcing a duplicate
+    # check onto a column that can't yet serve as one.
+
+  - table: genealogy.gold_ancestral_proximity
+    not_null_columns:
+      - column: person_id
+        known_failing: false
+      - column: ancestral_proximity
+        known_failing: false
+    duplicate_key: person_id
+    custom_checks:
+      - id: PILOT-A-BLOOD-RELATIVE
+        title: "gold_ancestral_proximity is_blood_relative mutual exclusivity (reproduces DQ-006)"
+        known_failing: false
+        existing_asana_task:
+        description: >
+          No person_id should have more than one distinct is_blood_relative
+          value. Reproduces DQ-006 exactly (see
+          tests/data_quality/checks/dq006_ancestral_proximity_blood_relative_exclusivity.sql).
+        sql: |
+          SELECT person_id, COUNT(DISTINCT is_blood_relative) AS distinct_flags
+          FROM genealogy.gold_ancestral_proximity
+          GROUP BY person_id
+          HAVING COUNT(DISTINCT is_blood_relative) > 1
