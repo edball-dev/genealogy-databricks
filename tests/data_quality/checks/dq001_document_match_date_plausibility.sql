@@ -65,20 +65,30 @@
 --   Thomas Thorpe was CONFIRMED CORRECTLY matched all along — not a
 --   mismatch. The 1894 doc is a probate/estate-sale notice ("...under the
 --   Will of the late Mr. Thomas Thorpe"), which legitimately postdates his
---   1888 death by 6 years; this check had no exemption for Probate/Will/
---   estate-sale documents (tracked at 1218506783096280). Fixed 2026-09-15:
---   the upper bound (death_year+2, or birth_year+110 with no death_year) no
---   longer applies to doc_type_detected IN ('Probate','Will',
---   'NewspaperClipping') — those doc types can legitimately postdate death
---   by years or decades (estate administration, obituaries, memorial
---   notices, estate-sale auctions), so only this check's lower (birth-side)
---   bound still applies to them, mirroring the same exemption added to
---   notebook_01_document_matching.ipynb Cell 5/Cell 5c's own year_plausible
---   logic (task 1218506594311016) so this check never drifts stricter than
---   the algorithm it guards, the same principle behind the 2026-09-14 lower-
---   bound fix above. Confirmed live: Thomas Thorpe's row cleared, DQ-001 at
---   0 violations. known_failing flipped to false — a future violation here
---   is a genuine regression, not a known/accepted gap.
+--   1888 death by 6 years; this check had no exemption for a
+--   NewspaperClipping like this one (tracked at 1218506783096280). Fixed
+--   2026-09-15: the upper bound (death_year+2, or birth_year+110 with no
+--   death_year) no longer applies to doc_type_detected = 'NewspaperClipping'
+--   — that doc type can legitimately postdate death by years or decades
+--   (obituaries, memorial notices, estate-sale auctions), so only this
+--   check's lower (birth-side) bound still applies to it, mirroring the same
+--   exemption added to notebook_01_document_matching.ipynb Cell 5/Cell 5c's
+--   own year_plausible logic (task 1218506594311016) so this check never
+--   drifts stricter than the algorithm it guards, the same principle behind
+--   the 2026-09-14 lower-bound fix above.
+--
+--   Probate/Will were also considered for this exemption (per this task's
+--   original proposed wording) but scoped back out after live validation:
+--   removing their upper bound entirely turned 4 previously-clean Corner/
+--   Cope Will matches into new LOW-confidence ties, because a candidate who
+--   died decades before the document (e.g. John Corner, d.1742, vs a
+--   CORNER_John_1760_Will.jpg document) became "plausible" once the upper
+--   bound was gone. No live Probate/Will case in this corpus actually needed
+--   the exemption — only Thorpe's NewspaperClipping did — so the fix stays
+--   scoped to what was observed, not the broader original wording. Confirmed
+--   live: Thomas Thorpe's row cleared, the 5 Corner/Cope Will rows are
+--   unaffected, DQ-001 at 0 violations. known_failing flipped to false — a
+--   future violation here is a genuine regression, not a known/accepted gap.
 
 SELECT DISTINCT dp.file_id, dp.person_gedcom_id, dp.display_name, dp.match_method,
        dp.match_confidence, t.doc_type_detected, t.year AS doc_year, pl.birth_year, pl.death_year
@@ -90,6 +100,6 @@ WHERE t.year RLIKE '^[0-9]{4}'
     CAST(SUBSTRING(t.year, 1, 4) AS INT) < pl.birth_year - 2
     OR (
       CAST(SUBSTRING(t.year, 1, 4) AS INT) > COALESCE(pl.death_year, pl.birth_year + 110) + 2
-      AND t.doc_type_detected NOT IN ('Probate', 'Will', 'NewspaperClipping')
+      AND t.doc_type_detected != 'NewspaperClipping'
     )
   );
