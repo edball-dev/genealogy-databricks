@@ -3,7 +3,7 @@
 -- severity: critical
 -- guards_bug: 1218420283786561
 -- known_failing: true
--- existing_asana_task: 1218448497347847
+-- existing_asana_task: 1218488426839724
 -- description: >
 --   A document's parsed year must fall within the matched person's plausible
 --   lifespan (birth_year .. death_year, or birth_year .. birth_year+110 if no
@@ -30,17 +30,24 @@
 --   Orme's row cleared.
 --
 --   Triage of the remaining 9 (2026-09-14/15, see task 1218447137381460):
---   6 rows (David Edmiston x5, Jonathan Croxon x1) are not a document-
---   matching problem — gold_person_life.death_year=1 for both, traced to a
---   date-parser bug that mis-parses "Bef. YYYY" qualifiers into year 1
---   (05a_parse_dates.ipynb), tracked separately at existing_asana_task above.
+--   6 rows (David Edmiston x5, Jonathan Croxon x1) were not a document-
+--   matching problem — gold_person_life.death_year=1 for both, traced not to
+--   a parser bug but to genealogy.gold_event (a Databricks-only view at the
+--   time) always taking silver_event_date.date_start, which is the year-1
+--   sentinel for a "BEF <year>" range instead of the real year held in
+--   date_end. Fixed and source-controlled in 07_materialise_gold_tables.ipynb
+--   Cells 1-4, applied to production and confirmed live 2026-09-15: those 6
+--   rows cleared, DQ-001 dropped from 9 to 3 violations. Full root-cause
+--   trace and resolution at Asana task 1218448497347847 (now closed).
+--
 --   The remaining 3 (Elizabeth Balls, Thomas Thorpe, Henry Easter) have clean
 --   birth/death years with no parsing issue, and the matched document's year
 --   is 4-12 years outside lifespan — genuine candidates for a wrong-person
 --   match or mis-parsed document year, filed separately for manual review at
---   Asana task 1218488426839724. known_failing is set to true because both
---   causes are tracked elsewhere rather than being a fresh regression in the
---   matching algorithm itself (0 of 9 rows point to a regression there).
+--   existing_asana_task above (1218488426839724). known_failing stays true
+--   because this is now the sole remaining cause, tracked elsewhere rather
+--   than a fresh regression in the matching algorithm itself (0 of 9 rows,
+--   original or remaining, ever pointed to a regression there).
 
 SELECT DISTINCT dp.file_id, dp.person_gedcom_id, dp.display_name, dp.match_method,
        dp.match_confidence, t.year AS doc_year, pl.birth_year, pl.death_year
