@@ -2,23 +2,23 @@
 -- title: gold_dna_coverage.dna_matches_total reconciliation
 -- severity: critical
 -- guards_bug: 1218420159647669
--- known_failing: true
+-- known_failing: false
 -- existing_asana_task: 1218420159647669
 -- description: >
 --   gold_dna_coverage.dna_matches_total per branch should equal the count of
---   'DNA Match' rows in gold_person_dna for that branch. Asana task
---   1218420159647669 documents this as a Ball-only overcount (24 vs 21
---   expected). Live testing (2026-09-14) found the discrepancy affects ALL
---   8 branches, and in the opposite direction to what's documented —
---   dna_matches_total under-reports vs a raw recount, not overcounts. This
---   needs Ed to update or re-scope the Asana task; don't treat the existing
---   task description as accurate. Root cause not yet diagnosed (possibly
---   dedup-by-match-name vs raw-row-count — tested and it doesn't cleanly
---   explain the gap either, see chat history).
+--   distinct people with a 'DNA Match' row in gold_person_dna for that
+--   branch. Fixed 2026-09-15 (triaged on Asana task 1218420159647669): the
+--   check previously recomputed via a raw COUNT(*) of gold_person_dna rows,
+--   but gold_person_dna is one row per person x DNA citation, so a person
+--   matched via more than one kit (e.g. both ed_ancestry and dad_ancestry)
+--   produces multiple rows for the same person. gold_dna_coverage
+--   deliberately dedupes with COUNT(DISTINCT person_gedcom_id) — this check
+--   now matches that semantic instead of flagging every multi-kit match as
+--   a false positive (was firing on 7/8 branches).
 
-SELECT c.branch, c.dna_matches_total AS reported_total, COUNT(*) AS recomputed_total
+SELECT c.branch, c.dna_matches_total AS reported_total, COUNT(DISTINCT d.person_gedcom_id) AS recomputed_total
 FROM genealogy.gold_dna_coverage c
 LEFT JOIN genealogy.gold_person_dna d
   ON d.branch = c.branch AND d.dna_role = 'DNA Match'
 GROUP BY c.branch, c.dna_matches_total
-HAVING c.dna_matches_total != COUNT(*);
+HAVING c.dna_matches_total != COUNT(DISTINCT d.person_gedcom_id);

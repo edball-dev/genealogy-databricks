@@ -32,21 +32,23 @@ tables:
     custom_checks:
       - id: PILOT-A-DNA-RECON
         title: "gold_dna_coverage.dna_matches_total reconciliation (reproduces DQ-008)"
-        known_failing: true
+        known_failing: false
         existing_asana_task: "1218420159647669"
         description: >
-          Per-branch dna_matches_total must equal a fresh COUNT(*) of 'DNA
-          Match' rows in gold_person_dna for that branch. Reproduces DQ-008
-          exactly (see tests/data_quality/checks/dq008_dna_matches_total_reconciliation.sql)
+          Per-branch dna_matches_total must equal a fresh COUNT(DISTINCT
+          person_gedcom_id) of 'DNA Match' rows in gold_person_dna for that
+          branch. Reproduces DQ-008 exactly (see
+          tests/data_quality/checks/dq008_dna_matches_total_reconciliation.sql)
           to test faithful reproduction of a known-correct check, not to
-          discover a new bug.
+          discover a new bug. Updated 2026-09-15 to match DQ-008's fix
+          (COUNT(*) was double-counting people matched via more than one kit).
         sql: |
-          SELECT c.branch, c.dna_matches_total AS reported_total, COUNT(*) AS recomputed_total
+          SELECT c.branch, c.dna_matches_total AS reported_total, COUNT(DISTINCT d.person_gedcom_id) AS recomputed_total
           FROM genealogy.gold_dna_coverage c
           LEFT JOIN genealogy.gold_person_dna d
             ON d.branch = c.branch AND d.dna_role = 'DNA Match'
           GROUP BY c.branch, c.dna_matches_total
-          HAVING c.dna_matches_total != COUNT(*)
+          HAVING c.dna_matches_total != COUNT(DISTINCT d.person_gedcom_id)
 
   - table: genealogy.gold_source_coverage
     not_null_columns:
