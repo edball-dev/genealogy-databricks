@@ -3,7 +3,7 @@
 -- severity: critical
 -- guards_bug: 1218420283786561
 -- known_failing: true
--- existing_asana_task: 1218488426839724
+-- existing_asana_task: 1218506783096280
 -- description: >
 --   A document's parsed year must fall within the matched person's plausible
 --   lifespan (birth_year .. death_year, or birth_year .. birth_year+110 if no
@@ -40,14 +40,35 @@
 --   rows cleared, DQ-001 dropped from 9 to 3 violations. Full root-cause
 --   trace and resolution at Asana task 1218448497347847 (now closed).
 --
---   The remaining 3 (Elizabeth Balls, Thomas Thorpe, Henry Easter) have clean
+--   The remaining 3 (Elizabeth Balls, Thomas Thorpe, Henry Easter) had clean
 --   birth/death years with no parsing issue, and the matched document's year
---   is 4-12 years outside lifespan — genuine candidates for a wrong-person
---   match or mis-parsed document year, filed separately for manual review at
---   existing_asana_task above (1218488426839724). known_failing stays true
---   because this is now the sole remaining cause, tracked elsewhere rather
---   than a fresh regression in the matching algorithm itself (0 of 9 rows,
---   original or remaining, ever pointed to a regression there).
+--   was 4-12 years outside lifespan. Manual review (task 1218488426839724,
+--   closed) found two distinct causes:
+--
+--   Elizabeth Balls and Henry Easter were genuine wrong-person matches, not
+--   data problems: the source documents spell a surname variant ("Balls" for
+--   tree surname "Baulls"; "Easter" for tree surname "Eastoe") that had no
+--   matching alias, so the matcher's fallback logic forced a match onto the
+--   nearest same-literal-surname person even though every such candidate was
+--   chronologically impossible. Fixed by adding a manually-curated
+--   SURNAME_VARIANT row to silver_person_alias for each (see
+--   notebook_01_document_matching.ipynb Cell 2) and re-pointing the two
+--   silver_document_person rows directly. Confirmed live: DQ-001 dropped
+--   from 3 to 1. The underlying matcher gaps that let a chronologically
+--   impossible candidate win in the first place (Cell 5's zero-plausible-
+--   candidates fallback; Cell 5c sibling-consensus has no year check at all)
+--   are tracked separately at task 1218506594311016 — unknown how many other
+--   matched files hit the same fallback, not fixed here.
+--
+--   Thomas Thorpe is CONFIRMED CORRECTLY matched — not a mismatch. The 1894
+--   doc is a probate/estate-sale notice ("...under the Will of the late Mr.
+--   Thomas Thorpe"), which legitimately postdates his 1888 death by years;
+--   DQ-001 has no exemption for Probate/Will/estate-sale documents. This is
+--   the sole remaining violation and is a pure check-design gap, tracked at
+--   existing_asana_task above (1218506783096280) — not fixed in this pass,
+--   pending a decision on how to scope the exemption. known_failing stays
+--   true because 0 of the original 10 (or any remaining) rows ever pointed
+--   to a regression in the matching algorithm itself.
 
 SELECT DISTINCT dp.file_id, dp.person_gedcom_id, dp.display_name, dp.match_method,
        dp.match_confidence, t.year AS doc_year, pl.birth_year, pl.death_year
