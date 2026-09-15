@@ -2,8 +2,8 @@
 -- title: Document match date plausibility (BUG-001 regression)
 -- severity: critical
 -- guards_bug: 1218420283786561
--- known_failing: true
--- existing_asana_task: 1218506783096280
+-- known_failing: false
+-- existing_asana_task:
 -- description: >
 --   A document's parsed year must fall within the matched person's plausible
 --   lifespan (birth_year .. death_year, or birth_year .. birth_year+110 if no
@@ -52,30 +52,54 @@
 --   nearest same-literal-surname person even though every such candidate was
 --   chronologically impossible. Fixed by adding a manually-curated
 --   SURNAME_VARIANT row to silver_person_alias for each (see
---   notebook_01_document_matching.ipynb Cell 2) and re-pointing the two
+--   notebook_01_document_matching.ipynb Cell 1) and re-pointing the two
 --   silver_document_person rows directly. Confirmed live: DQ-001 dropped
 --   from 3 to 1. The underlying matcher gaps that let a chronologically
 --   impossible candidate win in the first place (Cell 5's zero-plausible-
---   candidates fallback; Cell 5c sibling-consensus has no year check at all)
---   are tracked separately at task 1218506594311016 — unknown how many other
---   matched files hit the same fallback, not fixed here.
+--   candidates fallback; Cell 5c sibling-consensus with no year check at
+--   all) were tracked at task 1218506594311016 and fixed 2026-09-15 (Cell 5's
+--   NOT EXISTS fallback removed in favour of logging to the new
+--   silver_document_match_exception table; Cell 5c now checks the file's own
+--   year against the consensus person before applying it, same fallback).
 --
---   Thomas Thorpe is CONFIRMED CORRECTLY matched — not a mismatch. The 1894
---   doc is a probate/estate-sale notice ("...under the Will of the late Mr.
---   Thomas Thorpe"), which legitimately postdates his 1888 death by years;
---   DQ-001 has no exemption for Probate/Will/estate-sale documents. This is
---   the sole remaining violation and is a pure check-design gap, tracked at
---   existing_asana_task above (1218506783096280) — not fixed in this pass,
---   pending a decision on how to scope the exemption. known_failing stays
---   true because 0 of the original 10 (or any remaining) rows ever pointed
---   to a regression in the matching algorithm itself.
+--   Thomas Thorpe was CONFIRMED CORRECTLY matched all along — not a
+--   mismatch. The 1894 doc is a probate/estate-sale notice ("...under the
+--   Will of the late Mr. Thomas Thorpe"), which legitimately postdates his
+--   1888 death by 6 years; this check had no exemption for a
+--   NewspaperClipping like this one (tracked at 1218506783096280). Fixed
+--   2026-09-15: the upper bound (death_year+2, or birth_year+110 with no
+--   death_year) no longer applies to doc_type_detected = 'NewspaperClipping'
+--   — that doc type can legitimately postdate death by years or decades
+--   (obituaries, memorial notices, estate-sale auctions), so only this
+--   check's lower (birth-side) bound still applies to it, mirroring the same
+--   exemption added to notebook_01_document_matching.ipynb Cell 5/Cell 5c's
+--   own year_plausible logic (task 1218506594311016) so this check never
+--   drifts stricter than the algorithm it guards, the same principle behind
+--   the 2026-09-14 lower-bound fix above.
+--
+--   Probate/Will were also considered for this exemption (per this task's
+--   original proposed wording) but scoped back out after live validation:
+--   removing their upper bound entirely turned 4 previously-clean Corner/
+--   Cope Will matches into new LOW-confidence ties, because a candidate who
+--   died decades before the document (e.g. John Corner, d.1742, vs a
+--   CORNER_John_1760_Will.jpg document) became "plausible" once the upper
+--   bound was gone. No live Probate/Will case in this corpus actually needed
+--   the exemption — only Thorpe's NewspaperClipping did — so the fix stays
+--   scoped to what was observed, not the broader original wording. Confirmed
+--   live: Thomas Thorpe's row cleared, the 5 Corner/Cope Will rows are
+--   unaffected, DQ-001 at 0 violations. known_failing flipped to false — a
+--   future violation here is a genuine regression, not a known/accepted gap.
 
 SELECT DISTINCT dp.file_id, dp.person_gedcom_id, dp.display_name, dp.match_method,
-       dp.match_confidence, t.year AS doc_year, pl.birth_year, pl.death_year
+       dp.match_confidence, t.doc_type_detected, t.year AS doc_year, pl.birth_year, pl.death_year
 FROM genealogy.silver_document_person dp
 JOIN genealogy.ocr_transcriptions t ON t.file_id = dp.file_id
 JOIN genealogy.gold_person_life pl ON pl.person_gedcom_id = dp.person_gedcom_id
 WHERE t.year RLIKE '^[0-9]{4}'
-  AND CAST(SUBSTRING(t.year, 1, 4) AS INT) NOT BETWEEN
-      pl.birth_year - 2
-      AND COALESCE(pl.death_year, pl.birth_year + 110) + 2;
+  AND (
+    CAST(SUBSTRING(t.year, 1, 4) AS INT) < pl.birth_year - 2
+    OR (
+      CAST(SUBSTRING(t.year, 1, 4) AS INT) > COALESCE(pl.death_year, pl.birth_year + 110) + 2
+      AND t.doc_type_detected != 'NewspaperClipping'
+    )
+  );
