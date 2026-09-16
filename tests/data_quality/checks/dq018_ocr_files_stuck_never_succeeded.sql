@@ -3,7 +3,7 @@
 -- severity: warning
 -- guards_bug:
 -- known_failing: true
--- existing_asana_task:
+-- existing_asana_task: 1218567602351792
 -- description: >
 --   ocr_pipeline.ipynb's own idempotency check (Cell 14) only excludes a
 --   file_id from the next run's candidate list once ocr_processing_log has a

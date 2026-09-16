@@ -3,7 +3,7 @@
 -- severity: warning
 -- guards_bug:
 -- known_failing: true
--- existing_asana_task:
+-- existing_asana_task: 1218567581863400
 -- description: >
 --   ocr_transcriptions.file_id should stay consistent with
 --   staging_google_drive.documents (the Fivetran Drive sync ocr_pipeline.ipynb

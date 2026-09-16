@@ -3,7 +3,7 @@
 -- severity: warning
 -- guards_bug:
 -- known_failing: true
--- existing_asana_task:
+-- existing_asana_task: 1218567855930502
 -- description: >
 --   surname/forename/year/doc_type are parsed from the filename by
 --   parse_filename() in ocr_pipeline.ipynb (convention
