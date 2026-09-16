@@ -40,13 +40,15 @@
 #
 # ocr_transcriptions / ocr_processing_log / ocr_token_usage are also named
 # by §8 as bronze-ish ("...OCR ingest, minimally transformed") but are
-# deliberately left out of this registry: ocr_transcriptions already has
-# dedicated Tier 2 checks (DQ-005 duplicate transcribed_text; DQ-012 source
-# consistency vs staging_google_drive.documents; DQ-013 page_index
-# sequencing; DQ-014 doc_type_detected controlled-vocabulary conformance;
-# DQ-015 filename-parsed surname/forename/year plausibility; DQ-016
-# confidence/confidence_flag consistency; DQ-017 blank-transcription
-# flagging — see tests/data_quality/checks/dq012..dq017_ocr_*.sql), and Ed's
+# deliberately left out of this registry: ocr_transcriptions and
+# ocr_processing_log already have dedicated Tier 2 checks (DQ-005 duplicate
+# transcribed_text; DQ-012 source consistency vs
+# staging_google_drive.documents; DQ-013 page_index sequencing; DQ-014
+# doc_type_detected controlled-vocabulary conformance; DQ-015 filename-parsed
+# surname/forename/year plausibility; DQ-016 confidence/confidence_flag
+# consistency; DQ-017 blank-transcription flagging; DQ-018 files stuck in
+# ocr_processing_log with no successful attempt; DQ-019 structured-field JSON
+# shape — see tests/data_quality/checks/dq012..dq019_ocr_*.sql), and Ed's
 # own framing in Notion §9 treats the OCR workflow's output as feeding
 # directly into the silver layer (`ocr_transcriptions, silver_document_person,
 # etc.`) rather than as a standalone bronze stage — revisit if/when the OCR

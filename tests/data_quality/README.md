@@ -267,14 +267,16 @@ one hop earlier in the DAG. `bronze_gedcom` itself is the pipeline's root
 `bronze_gedcom_with_record` view it's actually built from — same
 never-a-view-in-`depends_on` rule as gold. `ocr_transcriptions`/
 `ocr_processing_log`/`ocr_token_usage` are bronze-shaped per §8's own
-definition but deliberately excluded here — `ocr_transcriptions` already has
-dedicated Tier 2 checks (DQ-005 duplicate text; DQ-012 source consistency
-vs `staging_google_drive.documents`; DQ-013 page-index sequencing; DQ-014
-`doc_type_detected` vocabulary; DQ-015 filename-parsed metadata
-plausibility; DQ-016 confidence/confidence_flag consistency; DQ-017 blank
-transcription flagging) and Notion §9 treats OCR output as feeding the
-silver layer rather than a standalone bronze stage; revisit if the OCR
-workflow gets its own Tier 1 pass.
+definition but deliberately excluded here — `ocr_transcriptions` and
+`ocr_processing_log` already have dedicated Tier 2 checks (DQ-005 duplicate
+text; DQ-012 source consistency vs `staging_google_drive.documents`; DQ-013
+page-index sequencing; DQ-014 `doc_type_detected` vocabulary; DQ-015
+filename-parsed metadata plausibility; DQ-016 confidence/confidence_flag
+consistency; DQ-017 blank transcription flagging; DQ-018 files stuck in
+`ocr_processing_log` with no successful attempt; DQ-019 structured-field
+JSON shape) and Notion §9 treats OCR output as feeding the silver layer
+rather than a standalone bronze stage; revisit if the OCR workflow gets its
+own Tier 1 pass.
 
 ### Ref layer (`tier1_ref_registry.yaml`)
 
