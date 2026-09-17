@@ -2,8 +2,8 @@
 -- title: ocr_transcriptions rows whose source file is gone/deleted from Drive
 -- severity: warning
 -- guards_bug:
--- known_failing: true
--- existing_asana_task:
+-- known_failing: false
+-- existing_asana_task: 1218567581863400
 -- description: >
 --   ocr_transcriptions.file_id should stay consistent with
 --   staging_google_drive.documents (the Fivetran Drive sync ocr_pipeline.ipynb
@@ -22,6 +22,85 @@
 --   silent accumulation. known_failing: true until the 9 current files are
 --   triaged (confirm each is an intentional cleanup, not a mistaken deletion
 --   that should be restored/re-pointed).
+--
+--   Triage (2026-09-17, Ed): 7 of the 9 file_ids (all 15 of the original 17
+--   rows -- the whole "7_June_1890_-_Conveyance.pdf" plus EASTOE_Charles x2,
+--   EDMISTON_David x2, BALL_Harriet, MADDOX_Samuel) turned out to be from a
+--   `_Possibles` Drive folder that should never have been Fivetran-synced in
+--   the first place -- unconfirmed documents Ed hadn't yet verified as his
+--   family, now moved out of the synced volume. Two of those (EDMISTON_David
+--   x2, EASTOE_Charles x2 -- 4 file_ids total) had already been auto-matched
+--   onto real tree people (David Edmiston @I999886834@, Charles Eastoe
+--   @I_967017894@) and fact-extracted/compared against the tree, so the
+--   cleanup wasn't just this table: also deleted the matching rows from
+--   silver_document_person (4), gold_transcript_facts (12), gold_fact_comparison
+--   (4), and silver_document_match_exception (1, MADDOX_Samuel). Confirmed
+--   live: all five tables at 0 rows for these 7 file_ids post-delete.
+--   gold_transcript_facts/gold_fact_comparison/silver_document_match_exception
+--   had to be added to the Databricks MCP's execute_write_sql allow-list
+--   first (edball-dev/databricks-mcp#2) -- ocr_transcriptions and
+--   silver_document_person were already writable.
+--
+--   The remaining 2 file_ids (HALLAM_Samuel_1875_Friends with Thomas
+--   Palmer.pdf, STIRLING_Marion_1889_Death.jpg) were unrelated to
+--   `_Possibles` -- both from confirmed Family_ folders, both successfully
+--   transcribed back in March. Whole-table analysis of
+--   staging_google_drive.documents (2026-09-17) ruled out ordinary
+--   staleness as the explanation: every currently-live row (963) was synced
+--   in one batch that same day, while every _fivetran_deleted=true row
+--   (174, including these 2) hadn't been touched since Feb-May -- i.e. many
+--   sync cycles had already passed without Fivetran's connector picking
+--   either of these files back up, so "wait for the next sync" was never
+--   going to resolve this on its own.
+--
+--   Ed's own investigation (2026-09-17) found two different root causes,
+--   not one:
+--   HALLAM was a genuine deletion -- the original file (a full newspaper
+--   page) was replaced in Drive by a new document (just the relevant
+--   clipping, a new file_id). Its old file_id (1C8C0zEEYdkpDDdnzePuw87VbP8SyoS7Y)
+--   correctly has no live source and every reference to it has now been
+--   deleted: ocr_transcriptions (1 row), ocr_processing_log (1),
+--   silver_document_person (1, was correctly matched to Samuel Hallam
+--   @I6040217745@ -- EXACT_MULTI/MEDIUM). ocr_token_usage (1 row) was left
+--   alone -- a token-cost log entry, not on the write allow-list, and not
+--   worth expanding it for. The replacement clipping will get its own
+--   transcription and match on a future pipeline run like any new file.
+--
+--   STIRLING is a different case: Ed confirms the file itself is unchanged
+--   -- at some earlier point it was renamed (a "Cert" suffix added), and
+--   *that* rename is what left the original file_id
+--   (15MbZLmj3bw4D_IZ2UR936KCfE7uh6wFu) orphaned/_fivetran_deleted, with
+--   Fivetran picking the renamed file up under a new file_id
+--   (1mXJs-lPgA6VL9YFEoy-QvrHuwkC6bnOi) instead of updating the original
+--   row in place.
+--
+--   Ed then renamed the file back to its original name (2026-09-17) to see
+--   how Fivetran would react -- and this second rename did NOT mint a
+--   third file_id: 1mXJs-lPgA6VL9YFEoy-QvrHuwkC6bnOi kept its file_id and
+--   just had its filename/_fivetran_file_path updated back to the
+--   original. So a plain rename, observed directly just now, preserves
+--   file_id under Fivetran's current connector behaviour -- the opposite
+--   of what the earlier "Cert" rename appeared to do. That earlier
+--   occurrence is unexplained (possibly not a pure in-place rename -- e.g.
+--   a delete-and-reupload under the new name, or an older/different
+--   connector behaviour at the time) rather than a reproduced rule; don't
+--   take "rename = new file_id" as confirmed pipeline behaviour off the
+--   back of this one case. staging_google_drive.documents still permanently
+--   holds both rows for this document -- the original, stuck at
+--   _fivetran_deleted=true (last synced 2026-05-31), and
+--   1mXJs-lPgA6VL9YFEoy-QvrHuwkC6bnOi, live.
+--
+--   Fix: re-pointed every reference from the old file_id to the new one
+--   (an UPDATE, not a delete+re-OCR, since the document was already
+--   correctly transcribed and matched) -- ocr_transcriptions (1 row),
+--   ocr_processing_log (1), silver_document_person (1, correctly matched
+--   to the STIRLING person already), gold_transcript_facts (9),
+--   gold_fact_comparison (2). ocr_token_usage (1 row under the old
+--   file_id) was left alone -- not on the write allow-list, a cost-log
+--   entry only. Confirmed live: 0 rows remain under the old file_id across
+--   all five tables, all 12 moved to the new one. DQ-012 confirmed at 0
+--   violations -- known_failing flipped to false, a future violation here
+--   is a genuine regression, not an expected/known gap.
 
 SELECT t.file_id, t.file_name, t.page_index,
        d.file_id IS NULL AS source_missing,
