@@ -2,7 +2,7 @@
 -- title: ocr_transcriptions rows whose source file is gone/deleted from Drive
 -- severity: warning
 -- guards_bug:
--- known_failing: true
+-- known_failing: false
 -- existing_asana_task: 1218567581863400
 -- description: >
 --   ocr_transcriptions.file_id should stay consistent with
@@ -66,18 +66,36 @@
 --   worth expanding it for. The replacement clipping will get its own
 --   transcription and match on a future pipeline run like any new file.
 --
---   STIRLING is a different case, still open: Ed confirms the file itself
---   is unchanged and still present in Drive, just renamed (a "Cert" suffix
---   added) -- and that rename is what made Fivetran's connector treat it as
---   a brand-new file_id rather than updating the existing one, leaving the
---   original file_id (15MbZLmj3bw4D_IZ2UR936KCfE7uh6wFu) orphaned. Ed is
---   renaming it back to test whether Fivetran then treats it as the
---   original file "undeleted" (ideal -- the existing transcript stays
---   linked, no action needed) or as yet another new file_id (in which case
---   the fix is re-pointing ocr_transcriptions.file_id from the old id to
---   the new one, not re-OCRing a document already transcribed). No action
---   taken on STIRLING pending that result. known_failing stays true until
---   it resolves one way or the other.
+--   STIRLING is a different case: Ed confirms the file itself is unchanged,
+--   just renamed (a "Cert" suffix added) -- and that rename is what made
+--   Fivetran's connector treat it as a brand-new file_id rather than
+--   updating the existing one, leaving the original file_id
+--   (15MbZLmj3bw4D_IZ2UR936KCfE7uh6wFu) orphaned/_fivetran_deleted.
+--
+--   Confirmed Fivetran/Drive connector behaviour on a rename (2026-09-17,
+--   worth remembering for any future rename): it is neither of the two
+--   hypothesised outcomes. Ed renamed the file back to its original name
+--   to test this, and Fivetran did NOT restore/undelete the original
+--   file_id -- it minted yet another new file_id
+--   (1mXJs-lPgA6VL9YFEoy-QvrHuwkC6bnOi) for the reverted name, so
+--   staging_google_drive.documents now permanently holds two rows with the
+--   identical _fivetran_file_path but different file_id: the original,
+--   forever stuck at _fivetran_deleted=true (last synced 2026-05-31), and
+--   the new one, live. A rename in Drive = a new file_id, full stop --
+--   there is no path back to the original file_id once renamed, even by
+--   reverting the name.
+--
+--   Fix: re-pointed every reference from the old file_id to the new one
+--   (an UPDATE, not a delete+re-OCR, since the document was already
+--   correctly transcribed and matched) -- ocr_transcriptions (1 row),
+--   ocr_processing_log (1), silver_document_person (1, correctly matched
+--   to the STIRLING person already), gold_transcript_facts (9),
+--   gold_fact_comparison (2). ocr_token_usage (1 row under the old
+--   file_id) was left alone -- not on the write allow-list, a cost-log
+--   entry only. Confirmed live: 0 rows remain under the old file_id across
+--   all five tables, all 12 moved to the new one. DQ-012 confirmed at 0
+--   violations -- known_failing flipped to false, a future violation here
+--   is a genuine regression, not an expected/known gap.
 
 SELECT t.file_id, t.file_name, t.page_index,
        d.file_id IS NULL AS source_missing,
