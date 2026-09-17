@@ -66,24 +66,29 @@
 --   worth expanding it for. The replacement clipping will get its own
 --   transcription and match on a future pipeline run like any new file.
 --
---   STIRLING is a different case: Ed confirms the file itself is unchanged,
---   just renamed (a "Cert" suffix added) -- and that rename is what made
---   Fivetran's connector treat it as a brand-new file_id rather than
---   updating the existing one, leaving the original file_id
---   (15MbZLmj3bw4D_IZ2UR936KCfE7uh6wFu) orphaned/_fivetran_deleted.
+--   STIRLING is a different case: Ed confirms the file itself is unchanged
+--   -- at some earlier point it was renamed (a "Cert" suffix added), and
+--   *that* rename is what left the original file_id
+--   (15MbZLmj3bw4D_IZ2UR936KCfE7uh6wFu) orphaned/_fivetran_deleted, with
+--   Fivetran picking the renamed file up under a new file_id
+--   (1mXJs-lPgA6VL9YFEoy-QvrHuwkC6bnOi) instead of updating the original
+--   row in place.
 --
---   Confirmed Fivetran/Drive connector behaviour on a rename (2026-09-17,
---   worth remembering for any future rename): it is neither of the two
---   hypothesised outcomes. Ed renamed the file back to its original name
---   to test this, and Fivetran did NOT restore/undelete the original
---   file_id -- it minted yet another new file_id
---   (1mXJs-lPgA6VL9YFEoy-QvrHuwkC6bnOi) for the reverted name, so
---   staging_google_drive.documents now permanently holds two rows with the
---   identical _fivetran_file_path but different file_id: the original,
---   forever stuck at _fivetran_deleted=true (last synced 2026-05-31), and
---   the new one, live. A rename in Drive = a new file_id, full stop --
---   there is no path back to the original file_id once renamed, even by
---   reverting the name.
+--   Ed then renamed the file back to its original name (2026-09-17) to see
+--   how Fivetran would react -- and this second rename did NOT mint a
+--   third file_id: 1mXJs-lPgA6VL9YFEoy-QvrHuwkC6bnOi kept its file_id and
+--   just had its filename/_fivetran_file_path updated back to the
+--   original. So a plain rename, observed directly just now, preserves
+--   file_id under Fivetran's current connector behaviour -- the opposite
+--   of what the earlier "Cert" rename appeared to do. That earlier
+--   occurrence is unexplained (possibly not a pure in-place rename -- e.g.
+--   a delete-and-reupload under the new name, or an older/different
+--   connector behaviour at the time) rather than a reproduced rule; don't
+--   take "rename = new file_id" as confirmed pipeline behaviour off the
+--   back of this one case. staging_google_drive.documents still permanently
+--   holds both rows for this document -- the original, stuck at
+--   _fivetran_deleted=true (last synced 2026-05-31), and
+--   1mXJs-lPgA6VL9YFEoy-QvrHuwkC6bnOi, live.
 --
 --   Fix: re-pointed every reference from the old file_id to the new one
 --   (an UPDATE, not a delete+re-OCR, since the document was already
