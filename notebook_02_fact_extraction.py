@@ -23,6 +23,16 @@
 # MAGIC         vertexai.generative_models is deprecated as of June 2025, removed June 2026.
 # MAGIC         New pattern: google-genai client (client.models.generate_content) with
 # MAGIC         types.GenerateContentConfig. Credentials passed via google.auth directly.
+# MAGIC - v1.4: Fix collateral-household fact-extraction gap (Asana 1218420653379642).
+# MAGIC         Cell 3's NOT EXISTS guard was scoped to file_id alone, so once any
+# MAGIC         person on a file had facts extracted, every other silver_document_person
+# MAGIC         row for that same file (a Cell 5b spouse-inference row, or a Cell 5e
+# MAGIC         household-member row) was silently skipped forever. Now scoped to
+# MAGIC         (file_id, person_gedcom_id). Also stopped feeding every row the
+# MAGIC         filename-parsed forename/surname regardless of which person the row is
+# MAGIC         actually about — now pulls the matched person's own given_name/surname
+# MAGIC         via gold_person_life, so a household member's row asks Gemini to extract
+# MAGIC         facts about *that* person, not the file's primary/filename subject.
 
 # COMMAND ----------
 
@@ -91,9 +101,9 @@ transcripts_df = spark.sql("""
     sdp.file_id,
     sdp.person_gedcom_id,
     sdp.match_confidence,
+    pl.given_name AS forename,
+    pl.surname,
     ot.file_name,
-    ot.surname,
-    ot.forename,
     ot.year,
     ot.doc_type_detected,
     ot.transcribed_text,
@@ -101,11 +111,20 @@ transcripts_df = spark.sql("""
     ot.locations
   FROM genealogy.silver_document_person sdp
   JOIN genealogy.ocr_transcriptions ot ON sdp.file_id = ot.file_id
+  JOIN genealogy.gold_person_life pl ON pl.person_gedcom_id = sdp.person_gedcom_id
   WHERE sdp.match_confidence IN ('HIGH', 'MEDIUM')
     AND ot.transcribed_text IS NOT NULL
+    -- Scoped per (file_id, person_gedcom_id), not just file_id: a household-
+    -- member row added to silver_document_person after this file's primary
+    -- person was already fact-extracted (Cell 5e in notebook_01 — census/
+    -- burial collaterals; Cell 5b's spouse-inference rows have the same
+    -- shape) must still get its own extraction pass, since the file_id alone
+    -- already having gold_transcript_facts rows says nothing about this
+    -- particular person.
     AND NOT EXISTS (
       SELECT 1 FROM genealogy.gold_transcript_facts gtf
       WHERE gtf.file_id = sdp.file_id
+        AND gtf.person_gedcom_id = sdp.person_gedcom_id
     )
   ORDER BY sdp.match_confidence DESC, ot.file_name
 """)
