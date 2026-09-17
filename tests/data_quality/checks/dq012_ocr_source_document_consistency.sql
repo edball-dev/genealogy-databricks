@@ -42,17 +42,42 @@
 --   silver_document_person were already writable.
 --
 --   The remaining 2 file_ids (HALLAM_Samuel_1875_Friends with Thomas
---   Palmer.pdf, STIRLING_Marion_1889_Death.jpg) are unrelated to `_Possibles`
---   -- both from confirmed Family_ folders, both successfully transcribed
---   back in March -- and are a different, still-open question: Ed confirms
---   HALLAM was renamed in Drive (to
---   "..._Nottingham_Journal_16_August_1875_0004_Clip.jpg") and STIRLING is
---   still present in Drive, unrenamed and undeleted. Both point at stale
---   Fivetran staging data (last _fivetran_synced 2026-04-27 and 2026-05-31
---   respectively) rather than a real deletion -- expected to self-clear on
---   the next Fivetran resync of staging_google_drive.documents, not
---   something to fix in this repo. known_failing stays true until that
---   resync happens and this check goes green.
+--   Palmer.pdf, STIRLING_Marion_1889_Death.jpg) were unrelated to
+--   `_Possibles` -- both from confirmed Family_ folders, both successfully
+--   transcribed back in March. Whole-table analysis of
+--   staging_google_drive.documents (2026-09-17) ruled out ordinary
+--   staleness as the explanation: every currently-live row (963) was synced
+--   in one batch that same day, while every _fivetran_deleted=true row
+--   (174, including these 2) hadn't been touched since Feb-May -- i.e. many
+--   sync cycles had already passed without Fivetran's connector picking
+--   either of these files back up, so "wait for the next sync" was never
+--   going to resolve this on its own.
+--
+--   Ed's own investigation (2026-09-17) found two different root causes,
+--   not one:
+--   HALLAM was a genuine deletion -- the original file (a full newspaper
+--   page) was replaced in Drive by a new document (just the relevant
+--   clipping, a new file_id). Its old file_id (1C8C0zEEYdkpDDdnzePuw87VbP8SyoS7Y)
+--   correctly has no live source and every reference to it has now been
+--   deleted: ocr_transcriptions (1 row), ocr_processing_log (1),
+--   silver_document_person (1, was correctly matched to Samuel Hallam
+--   @I6040217745@ -- EXACT_MULTI/MEDIUM). ocr_token_usage (1 row) was left
+--   alone -- a token-cost log entry, not on the write allow-list, and not
+--   worth expanding it for. The replacement clipping will get its own
+--   transcription and match on a future pipeline run like any new file.
+--
+--   STIRLING is a different case, still open: Ed confirms the file itself
+--   is unchanged and still present in Drive, just renamed (a "Cert" suffix
+--   added) -- and that rename is what made Fivetran's connector treat it as
+--   a brand-new file_id rather than updating the existing one, leaving the
+--   original file_id (15MbZLmj3bw4D_IZ2UR936KCfE7uh6wFu) orphaned. Ed is
+--   renaming it back to test whether Fivetran then treats it as the
+--   original file "undeleted" (ideal -- the existing transcript stays
+--   linked, no action needed) or as yet another new file_id (in which case
+--   the fix is re-pointing ocr_transcriptions.file_id from the old id to
+--   the new one, not re-OCRing a document already transcribed). No action
+--   taken on STIRLING pending that result. known_failing stays true until
+--   it resolves one way or the other.
 
 SELECT t.file_id, t.file_name, t.page_index,
        d.file_id IS NULL AS source_missing,
