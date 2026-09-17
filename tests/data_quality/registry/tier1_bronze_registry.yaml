@@ -48,7 +48,12 @@
 # surname/forename/year plausibility; DQ-016 confidence/confidence_flag
 # consistency; DQ-017 blank-transcription flagging; DQ-018 files stuck in
 # ocr_processing_log with no successful attempt; DQ-019 structured-field JSON
-# shape — see tests/data_quality/checks/dq012..dq019_ocr_*.sql), and Ed's
+# shape; DQ-020 duplicate Drive file_id per path in
+# staging_google_drive.documents; DQ-021 silver/gold rows referencing a
+# file_id no longer in ocr_transcriptions (a Tier 2 stopgap for a Tier 1 gap
+# tracked at task 1218582528489867 — ocr_transcriptions/gold objects were
+# never inventoried into any Tier 1 fk_integrity check)
+# — see tests/data_quality/checks/dq012..dq021_ocr_*.sql), and Ed's
 # own framing in Notion §9 treats the OCR workflow's output as feeding
 # directly into the silver layer (`ocr_transcriptions, silver_document_person,
 # etc.`) rather than as a standalone bronze stage — revisit if/when the OCR
