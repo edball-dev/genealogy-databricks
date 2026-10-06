@@ -10,10 +10,15 @@
 -- MAGIC
 -- MAGIC **Statuses:** `FALSE_POSITIVE` (not a real conflict), `RESOLVED` (real; fixed at source —
 -- MAGIC tree, transcript or match corrected), `ACCEPTED` (genuine discrepancy in the record itself,
--- MAGIC assessed, nothing further to do — optional, Ed to confirm).
+-- MAGIC GPS-assessed and resolved — link the assessment in `notes` where one exists; NOT a general
+-- MAGIC "nothing to do" dismissal, use FALSE_POSITIVE for that).
 -- MAGIC
 -- MAGIC **Reason codes (suggested):** PLACE_GRANULARITY, LIFE_STAGE_OCCUPATION, TRANSCRIPTION_ERROR,
--- MAGIC WRONG_PERSON_MATCH, TREE_CORRECTED, CENSUS_AGE_DRIFT, OTHER.
+-- MAGIC WRONG_PERSON_MATCH, TREE_CORRECTED, CENSUS_AGE_DRIFT, OTHER, plus two occupation outcomes:
+-- MAGIC `TREE_GAP` (legitimate occupation the tree should record — appears in
+-- MAGIC `gold_housekeeping_tree_gap_occupations` and fires SIGNAL_TRANSCRIPT_ONLY_FACTS until the tree
+-- MAGIC matches; never an open conflict) and `NOT_AN_OCCUPATION` (student/pupil status, club or
+-- MAGIC association role — appears nowhere). Validated by DQ-022.
 -- MAGIC
 -- MAGIC **Conversational review:** Claude lists open conflicts (`gold_fact_comparison_reviewed WHERE
 -- MAGIC is_open_conflict`) grouped by person; Ed says what to mark; Claude writes rows with
