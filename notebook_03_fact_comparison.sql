@@ -14,6 +14,9 @@
 -- MAGIC         occupation matches; tree_value shows all occupations pipe-separated.
 -- MAGIC         Cell 4: add military rank exclusion filter (Pte, Cpl, Sgt etc.).
 -- MAGIC         Cell 4: add conflict_severity = LOW for occupation conflicts (was NULL).
+-- MAGIC - v1.2: Cell 9 creates view gold_fact_comparison_reviewed, applying Ed's review marks from
+-- MAGIC         silver_fact_conflict_review (see notebook_fact_conflict_review_init.sql — prerequisite).
+-- MAGIC         Consumers counting/listing conflicts should use its is_open_conflict flag.
 
 -- COMMAND ----------
 
@@ -359,3 +362,67 @@ SELECT
 FROM genealogy.gold_fact_comparison fc
 WHERE fc.person_gedcom_id = '@I123@'
 ORDER BY fc.fact_type;
+
+-- COMMAND ----------
+
+-- MAGIC %md
+-- MAGIC ## Cell 9 — gold_fact_comparison_reviewed (applies review marks)
+-- MAGIC
+-- MAGIC Prerequisite: `silver_fact_conflict_review` exists (notebook_fact_conflict_review_init).
+-- MAGIC
+-- MAGIC Key: file_id + person_gedcom_id + fact_type + transcript_value (null-safe). The latest review
+-- MAGIC per key wins. `review_applies` is TRUE only while the tree value is unchanged since the
+-- MAGIC review (`reviewed_tree_value`); a changed tree value reopens the conflict, and a changed
+-- MAGIC transcript value or new file_id is simply a new key (open). Reviewed rows stay visible here.
+-- MAGIC `is_open_conflict` is the single definition of "conflict still needing attention".
+
+-- COMMAND ----------
+
+-- %sql
+CREATE OR REPLACE VIEW genealogy.gold_fact_comparison_reviewed AS
+WITH latest_review AS (
+  SELECT * EXCEPT (rn)
+  FROM (
+    SELECT r.*,
+           ROW_NUMBER() OVER (
+             PARTITION BY file_id, person_gedcom_id, fact_type, transcript_value
+             ORDER BY reviewed_at DESC NULLS LAST
+           ) AS rn
+    FROM genealogy.silver_fact_conflict_review r
+  )
+  WHERE rn = 1
+)
+SELECT
+  fc.*,
+  rv.review_status,
+  rv.reason_code        AS review_reason_code,
+  rv.notes              AS review_notes,
+  rv.reviewed_at,
+  rv.reviewed_tree_value,
+  COALESCE(rv.review_status IS NOT NULL
+           AND rv.reviewed_tree_value <=> fc.tree_value, FALSE)               AS review_applies,
+  (fc.status = 'CONFLICT'
+   AND NOT COALESCE(rv.review_status IS NOT NULL
+                    AND rv.reviewed_tree_value <=> fc.tree_value, FALSE))     AS is_open_conflict
+FROM genealogy.gold_fact_comparison fc
+LEFT JOIN latest_review rv
+  ON  rv.file_id          = fc.file_id
+  AND rv.person_gedcom_id = fc.person_gedcom_id
+  AND rv.fact_type        = fc.fact_type
+  AND rv.transcript_value <=> fc.transcript_value;
+
+-- COMMAND ----------
+
+-- MAGIC %md
+-- MAGIC ## Cell 10 — Open vs reviewed conflict counts
+
+-- COMMAND ----------
+
+-- %sql
+SELECT fact_type, conflict_severity,
+       SUM(CASE WHEN is_open_conflict THEN 1 ELSE 0 END)                         AS open_conflicts,
+       SUM(CASE WHEN status = 'CONFLICT' AND review_applies THEN 1 ELSE 0 END)  AS reviewed_conflicts
+FROM genealogy.gold_fact_comparison_reviewed
+WHERE status = 'CONFLICT'
+GROUP BY fact_type, conflict_severity
+ORDER BY fact_type, conflict_severity;
