@@ -23,4 +23,4 @@ LEFT JOIN genealogy.gold_fact_comparison fc
   AND fc.transcript_value <=> r.transcript_value
   AND fc.status           = 'CONFLICT'
 WHERE fc.file_id IS NULL
-   OR NOT (r.reviewed_tree_value <=> fc.tree_value);
+   OR (r.reason_code IS DISTINCT FROM 'TREE_GAP' AND NOT (r.reviewed_tree_value <=> fc.tree_value));
