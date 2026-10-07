@@ -46,6 +46,8 @@
 # MAGIC         census links whose mention age disagrees with the tree birth year by >5 years are logged to
 # MAGIC         silver_document_match_exception and not stored against that tree person.
 # MAGIC         Needs notebook_02_schema_and_cleanup.sql applied first.
+# MAGIC - v2.1: Align Gemini config with ocr_pipeline: model gemini-3.1-pro-preview (gemini-3-pro-preview returns 404 on this
+# MAGIC         project), thinking_level LOW, max_output_tokens 65536.
 # MAGIC
 # COMMAND ----------
 
@@ -85,7 +87,7 @@ import google.api_core.exceptions
 
 GCP_PROJECT    = "genealogy-488213"
 GCP_LOCATION   = "global"
-GEMINI_MODEL   = "gemini-3-pro-preview"   # swap to gemini-3-flash-preview if cost is a concern
+GEMINI_MODEL   = "gemini-3.1-pro-preview"   # same model as ocr_pipeline VERTEX_MODEL; gemini-3-pro-preview 404s on this project
 REQUEST_DELAY  = 4
 MAX_RETRIES    = 5
 MAX_CHUNK_CHARS = 30000     # a page longer than this is split on line boundaries into several calls
@@ -287,8 +289,8 @@ def _call_gemini_once(prompt: str) -> dict:
         contents=prompt,
         config=types.GenerateContentConfig(
             temperature=0.1,
-            max_output_tokens=16384,
-            # thinking_config=types.ThinkingConfig(thinking_level="LOW"), # uncomment if token count is too high
+            max_output_tokens=65536,   # as ocr_pipeline; thinking tokens count against this
+            thinking_config=types.ThinkingConfig(thinking_level="LOW"),   # as ocr_pipeline: keeps Gemini 3 thinking (and cost) down
             http_options=types.HttpOptions(timeout=180000),
         ),
     )
