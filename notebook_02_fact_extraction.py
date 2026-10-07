@@ -48,6 +48,8 @@
 # MAGIC         Needs notebook_02_schema_and_cleanup.sql applied first.
 # MAGIC - v2.1: Align Gemini config with ocr_pipeline: model gemini-3.1-pro-preview (gemini-3-pro-preview returns 404 on this
 # MAGIC         project), thinking_level LOW, max_output_tokens 65536.
+# MAGIC - v2.2: force_file_ids now limits the run to exactly those files (previously they were only added to the backlog, so
+# MAGIC         max_pages could be spent on other files first).
 # MAGIC
 # COMMAND ----------
 
@@ -132,6 +134,10 @@ if not DRY_RUN:
 status_filter = "st.status = 'ERROR'" if RETRY_ERRORS else "FALSE"
 force_list = ",".join("'" + f.replace("'", "") + "'" for f in FORCE_FILE_IDS) or "''"
 
+# When force_file_ids is set the run is limited to exactly those files (status ignored); otherwise the normal backlog applies.
+scope_filter = (f"ot.file_id IN ({force_list})" if FORCE_FILE_IDS
+                else f"(st.file_id IS NULL OR {status_filter})")
+
 pages_df = spark.sql(f"""
   SELECT ot.file_id, ot.file_name, ot.page_index, ot.year, ot.doc_type_detected,
          ot.transcribed_text, ot.personal_names, ot.locations,
@@ -142,7 +148,7 @@ pages_df = spark.sql(f"""
   WHERE ot.transcribed_text IS NOT NULL
     AND EXISTS (SELECT 1 FROM genealogy.silver_document_person sdp
                 WHERE sdp.file_id = ot.file_id AND sdp.match_confidence IN ('HIGH', 'MEDIUM'))
-    AND (st.file_id IS NULL OR {status_filter} OR ot.file_id IN ({force_list}))
+    AND {scope_filter}
   ORDER BY ot.file_name, ot.page_index
 """)
 pages = [r.asDict() for r in pages_df.collect()]
