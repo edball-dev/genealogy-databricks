@@ -446,6 +446,7 @@ else:
             time.sleep(REQUEST_DELAY)
             continue
 
+        gemini_returned_facts = bool(page_facts)   # status below reflects Gemini's output, not what survives de-duplication
         # one fact per (person, type, value) per file: a later page repeating an earlier page's fact is dropped
         file_seen = seen_facts.setdefault(p["file_id"], set())
         deduped = []
@@ -485,7 +486,7 @@ else:
                               "source_doc_type": p["doc_type_detected"], "extracted_at": now(),
                               "page_index": p["page_index"], "person_index": pi})
             written += 1
-        status = "DONE" if page_facts else "NO_PEOPLE"
+        status = "DONE" if gemini_returned_facts else "NO_PEOPLE"
         if rejected and rejected == len({pi for pi, *_ in page_facts if links.get(pi)}) and rejected > 0:
             status = "REJECTED"
         status_rows.append((p["file_id"], p["page_index"], status, f"{rejected} link(s) rejected" if rejected else None, calls, written, now()))
