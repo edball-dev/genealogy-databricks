@@ -53,6 +53,8 @@
 # MAGIC - v2.3: Forced re-extraction replaces ALL of a file's facts (not just legacy), only when every page succeeded. Linking of
 # MAGIC         filename/primary matches to a mention (name variants, census age tie-break) lives in notebook_01 Cell 5h2, not here:
 # MAGIC         a person with no person_index is simply left unlinked.
+# MAGIC - v2.5: Facts are de-duplicated across the pages of a file (and against facts from earlier runs); the prompt says to take
+# MAGIC         facts only from the transcript, not the people list.
 # MAGIC - v2.4: fact_year is filled from a 4-digit fact_value for birth_year/death_year/marriage_year when Gemini leaves it null
 # MAGIC         (notebook_03 compares on fact_year; a NULL gave CONFLICT with no severity).
 # MAGIC
@@ -189,6 +191,17 @@ if file_ids:
         legacy_pairs.add((r["file_id"], r["person_gedcom_id"]))
 
 
+# Facts already stored for a file (earlier pages or earlier runs) so the same fact is never written twice across pages.
+# Forced files are replaced wholesale, so they start empty.
+seen_facts = {}
+if file_ids:
+    for r in spark.sql(f"""
+        SELECT file_id, person_index, fact_type, fact_value FROM genealogy.gold_transcript_facts
+        WHERE file_id IN ({ids_sql}) AND person_index IS NOT NULL
+    """).collect():
+        if r["file_id"] not in FORCE_FILE_IDS:
+            seen_facts.setdefault(r["file_id"], set()).add((r["person_index"], r["fact_type"], str(r["fact_value"]).strip().lower()))
+
 def mentions_for_page(p):
     ms = mentions_by_file.get(p["file_id"], [])
     out = [m for m in ms if m["page_index"] is not None and m["page_index"] == p["page_index"]]
@@ -256,7 +269,7 @@ ADDITIONAL CONTEXT:
 
 INSTRUCTIONS:
 1. Return facts for each listed person, keyed by person_index. Read each person's own entry, not another person's: where several people share a first name or surname (father and son, two Georges), use the listed age and role to tell them apart.
-2. If a listed person does not appear in this transcript excerpt, omit them. Do not invent people or facts.
+2. If a listed person does not appear in this transcript excerpt, omit them. Do not invent people or facts. Take facts only from the TRANSCRIPT: the people list says who is who, and its details are already recorded elsewhere, so do not repeat them for a person who is not in this excerpt.
 3. Do NOT return forename, surname or age_at_doc: they are already recorded.
 4. Extract these fact types where present:
    - birth_year (4-digit), birth_place, death_year, death_place, marriage_year, marriage_place
@@ -432,6 +445,16 @@ else:
             errored_files.add(p["file_id"])
             time.sleep(REQUEST_DELAY)
             continue
+
+        # one fact per (person, type, value) per file: a later page repeating an earlier page's fact is dropped
+        file_seen = seen_facts.setdefault(p["file_id"], set())
+        deduped = []
+        for f in page_facts:
+            key = (f[0], f[1], str(f[2]).strip().lower())
+            if key not in file_seen:
+                file_seen.add(key)
+                deduped.append(f)
+        page_facts = deduped
 
         links = {}
         for l in links_by_file.get(p["file_id"], []):
