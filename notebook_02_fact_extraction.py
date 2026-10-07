@@ -53,6 +53,8 @@
 # MAGIC - v2.3: Forced re-extraction replaces ALL of a file's facts (not just legacy), only when every page succeeded. Linking of
 # MAGIC         filename/primary matches to a mention (name variants, census age tie-break) lives in notebook_01 Cell 5h2, not here:
 # MAGIC         a person with no person_index is simply left unlinked.
+# MAGIC - v2.4: fact_year is filled from a 4-digit fact_value for birth_year/death_year/marriage_year when Gemini leaves it null
+# MAGIC         (notebook_03 compares on fact_year; a NULL gave CONFLICT with no severity).
 # MAGIC
 # COMMAND ----------
 
@@ -97,6 +99,7 @@ REQUEST_DELAY  = 4
 MAX_RETRIES    = 5
 MAX_CHUNK_CHARS = 30000     # a page longer than this is split on line boundaries into several calls
 AGE_CHECK_DOC_TYPES = {"Census"}   # doc types where mention age is a true age at document date
+YEAR_FACT_TYPES = {"birth_year", "death_year", "marriage_year"}   # fact_year is derived from fact_value for these
 AGE_CHECK_TOLERANCE = 5            # years between (doc year - mention age) and tree birth year before a link is rejected
 
 dbutils.widgets.dropdown("dry_run", "true", ["true", "false"], "Dry run (no Gemini calls, no writes)")
@@ -450,6 +453,10 @@ else:
                                            f"FACT_EXTRACTION_LINK_REJECTED: {why}", ls[0]["person_gedcom_id"], now()))
             if gid is not None and (p["file_id"], gid) in legacy_pairs and p["file_id"] not in FORCE_FILE_IDS:
                 continue                          # already has legacy facts; not duplicated
+            # notebook_03 compares birth/death years on fact_year, so it must be set for the *_year types even when
+            # Gemini leaves it null: take it from a 4-digit fact_value.
+            if not isinstance(y, int) and t in YEAR_FACT_TYPES and re.fullmatch(r"\d{4}", str(v).strip()):
+                y = int(str(v).strip())
             fact_rows.append({"file_id": p["file_id"], "person_gedcom_id": gid, "fact_type": t, "fact_value": v,
                               "fact_year": y if isinstance(y, int) else None, "confidence": c, "inferred": inf,
                               "source_doc_type": p["doc_type_detected"], "extracted_at": now(),
