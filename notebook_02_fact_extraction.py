@@ -50,6 +50,9 @@
 # MAGIC         project), thinking_level LOW, max_output_tokens 65536.
 # MAGIC - v2.2: force_file_ids now limits the run to exactly those files (previously they were only added to the backlog, so
 # MAGIC         max_pages could be spent on other files first).
+# MAGIC - v2.3: Anchor resolution for matcher rows with no mention key (primary filename matches): the tree person is linked to the
+# MAGIC         single name+age-consistent mention on the file, else logged as FACT_EXTRACTION_NO_ANCHOR and left unlinked. Forced
+# MAGIC         re-extraction now replaces ALL of a file's facts (not just legacy), only when every page succeeded.
 # MAGIC
 # COMMAND ----------
 
@@ -68,7 +71,7 @@
 # MAGIC ## Cell 2 — Imports, config and run controls
 # MAGIC
 # MAGIC Widgets: `dry_run` (default true: counts pages/calls, no Gemini call, no writes), `max_pages` (hard cap on pages per run),
-# MAGIC `force_file_ids` (comma-separated file_ids to re-extract: their legacy facts, those with page_index NULL, are deleted after a successful extraction),
+# MAGIC `force_file_ids` (comma-separated file_ids to re-extract; the run is limited to them and their existing facts are replaced after a successful extraction),
 # MAGIC `retry_errors` (re-run pages whose status is ERROR; off by default so errors are not silently re-billed).
 
 # COMMAND ----------
@@ -182,6 +185,54 @@ if file_ids:
     """).collect():
         legacy_pairs.add((r["file_id"], r["person_gedcom_id"]))
 
+
+# Anchor resolution: filename/matcher rows with no mention key (primary matches from Cell 5/5b/5c have person_index NULL).
+# The tree person is matched to ONE mention on the file by name (3-letter forename prefix + 4-letter surname prefix, so
+# Geo/George, Thos/Thomas, Piggen/Piggin all work) and, on census pages, by age. Exactly one candidate links; zero or several
+# stay unlinked (never guessed). In-memory only: silver_document_person is notebook_01's table.
+def _norm(x): return re.sub(r"[^a-z]", "", (x or "").lower())
+
+anchor_exceptions, anchor_stats = [], {"linked": 0, "none": 0, "ambiguous": 0}
+doc_meta = {p["file_id"]: p for p in pages}
+if file_ids:
+    for a in spark.sql(f"""
+        SELECT sdp.file_id, sdp.person_gedcom_id, pl.given_name, pl.surname, pl.birth_year AS tree_birth_year
+        FROM genealogy.silver_document_person sdp
+        LEFT JOIN genealogy.gold_person_life pl ON pl.person_gedcom_id = sdp.person_gedcom_id
+        WHERE sdp.file_id IN ({ids_sql}) AND sdp.match_confidence IN ('HIGH', 'MEDIUM') AND sdp.person_index IS NULL
+    """).collect():
+        fid, meta = a["file_id"], doc_meta[a["file_id"]]
+        claimed = {l["person_index"] for l in links_by_file.get(fid, [])}
+        fore = [_norm(t)[:3] for t in (a["given_name"] or "").split() if len(_norm(t)) >= 2]
+        sur = _norm(a["surname"])[:4]
+        name_hits = []
+        for m in mentions_by_file.get(fid, []):
+            if m["person_index"] in claimed:
+                continue
+            toks = (m["name_raw"] or "").split()
+            if len(toks) < 2:
+                continue
+            if _norm(toks[-1])[:4] == sur and any(_norm(toks[0])[:3] == f for f in fore):
+                name_hits.append(m)
+        ok = []
+        for m in name_hits:
+            if meta["doc_type_detected"] in AGE_CHECK_DOC_TYPES and m["age_years"] is not None \
+               and a["tree_birth_year"] is not None and str(meta["year"] or "").isdigit():
+                if abs(int(meta["year"]) - int(m["age_years"]) - int(a["tree_birth_year"])) > AGE_CHECK_TOLERANCE:
+                    continue
+            ok.append(m)
+        if len(ok) == 1:
+            links_by_file.setdefault(fid, []).append({"file_id": fid, "page_index": None, "person_index": ok[0]["person_index"],
+                                                      "person_gedcom_id": a["person_gedcom_id"], "tree_birth_year": a["tree_birth_year"]})
+            anchor_stats["linked"] += 1
+        else:
+            anchor_stats["ambiguous" if len(ok) > 1 else "none"] += 1
+            anchor_exceptions.append((fid, meta["file_name"], meta["doc_type_detected"], meta["year"], a["surname"], a["given_name"],
+                                      len(name_hits),
+                                      "FACT_EXTRACTION_NO_ANCHOR: " + (f"{len(ok)} mentions fit" if ok else
+                                      f"{len(name_hits)} same-name mention(s), none consistent with tree b.{a['tree_birth_year']}" if name_hits else "no mention with this name"),
+                                      a["person_gedcom_id"], None))
+print(f"Anchor resolution for matcher rows with no mention key: {anchor_stats}")
 
 def mentions_for_page(p):
     ms = mentions_by_file.get(p["file_id"], [])
@@ -360,7 +411,7 @@ print("Functions defined.")
 
 # COMMAND ----------
 
-fact_rows, status_rows, exception_rows, forced_cleanup = [], [], [], set()
+fact_rows, status_rows, exception_rows, forced_cleanup, errored_files = [], [], list(anchor_exceptions), set(), set()
 now = lambda: datetime.now(timezone.utc)
 
 
@@ -423,6 +474,7 @@ else:
         except Exception as e:
             print(f"  ✗ ERROR: {e}")
             status_rows.append((p["file_id"], p["page_index"], "ERROR", str(e)[:1000], 0, 0, now()))
+            errored_files.add(p["file_id"])
             time.sleep(REQUEST_DELAY)
             continue
 
@@ -475,11 +527,13 @@ else:
 if DRY_RUN:
     print("Dry run: nothing written.")
 else:
-    # Forced re-extraction: remove the file's legacy facts (page_index NULL) only now that extraction succeeded.
+    # Forced re-extraction: replace the file's existing facts (legacy and any earlier page-level run) only now that extraction
+    # succeeded for every page of the file. Must run before the append below.
+    forced_cleanup -= errored_files
     for fid in forced_cleanup:
-        spark.sql(f"DELETE FROM genealogy.gold_transcript_facts WHERE file_id = '{fid}' AND page_index IS NULL")
+        spark.sql(f"DELETE FROM genealogy.gold_transcript_facts WHERE file_id = '{fid}'")
     if forced_cleanup:
-        print(f"Deleted legacy facts for {len(forced_cleanup)} forced file(s).")
+        print(f"Replaced existing facts for {len(forced_cleanup)} forced file(s).")
 
     if fact_rows:
         schema = StructType([
@@ -522,8 +576,13 @@ else:
             StructField("surname", StringType(), True), StructField("forename", StringType(), True),
             StructField("candidate_count", IntegerType(), True), StructField("reason", StringType(), True),
             StructField("candidates_considered", StringType(), True), StructField("logged_at", TimestampType(), True)])
-        spark.createDataFrame(exception_rows, schema=e_schema).write.format("delta").mode("append").saveAsTable("genealogy.silver_document_match_exception")
-        print(f"Logged {len(exception_rows)} rejected link(s) to silver_document_match_exception")
+        # don't re-log an exception already recorded for the same file, person and reason
+        have = {(r["file_id"], r["candidates_considered"], r["reason"]) for r in spark.sql(
+            "SELECT file_id, candidates_considered, reason FROM genealogy.silver_document_match_exception WHERE reason LIKE 'FACT_EXTRACTION%'").collect()}
+        exception_rows = [e[:9] + (e[9] or now(),) for e in exception_rows if (e[0], e[8], e[7]) not in have]
+        if exception_rows:
+            spark.createDataFrame(exception_rows, schema=e_schema).write.format("delta").mode("append").saveAsTable("genealogy.silver_document_match_exception")
+        print(f"Logged {len(exception_rows)} new rejected/unanchored link(s) to silver_document_match_exception")
 
 # COMMAND ----------
 
