@@ -53,6 +53,8 @@
 # MAGIC - v2.3: Forced re-extraction replaces ALL of a file's facts (not just legacy), only when every page succeeded. Linking of
 # MAGIC         filename/primary matches to a mention (name variants, census age tie-break) lives in notebook_01 Cell 5h2, not here:
 # MAGIC         a person with no person_index is simply left unlinked.
+# MAGIC - v2.7: Facts, page statuses and exceptions are written to Delta every chunk_pages (default 25) pages at a file boundary, not once
+# MAGIC         at the end, so a stuck or killed run loses at most one chunk. Status rows are de-duplicated per (file, page).
 # MAGIC - v2.6: Retry on the google-genai SDK's own errors (APIError .code 429/500/503/504). The old decorator listed google.api_core
 # MAGIC         exceptions, which the SDK never raises, so quota errors were not retried and pages were marked ERROR (14 of ~250
 # MAGIC         pages in the first 200-page run). Backoff now up to 120s.
@@ -79,7 +81,8 @@
 # MAGIC
 # MAGIC Widgets: `dry_run` (default true: counts pages/calls, no Gemini call, no writes), `max_pages` (hard cap on pages per run),
 # MAGIC `force_file_ids` (comma-separated file_ids to re-extract; the run is limited to them and their existing facts are replaced after a successful extraction),
-# MAGIC `retry_errors` (re-run pages whose status is ERROR; off by default so errors are not silently re-billed).
+# MAGIC `retry_errors` (re-run pages whose status is ERROR; off by default so errors are not silently re-billed),
+# MAGIC `chunk_pages` (facts, statuses and exceptions are written to Delta every N pages at a file boundary, so a stuck or killed run loses at most one chunk).
 
 # COMMAND ----------
 
@@ -112,12 +115,14 @@ dbutils.widgets.dropdown("dry_run", "true", ["true", "false"], "Dry run (no Gemi
 dbutils.widgets.text("max_pages", "25", "Max pages to process this run")
 dbutils.widgets.text("force_file_ids", "", "Comma-separated file_ids to re-extract")
 dbutils.widgets.dropdown("retry_errors", "false", ["true", "false"], "Retry pages with status ERROR")
+dbutils.widgets.text("chunk_pages", "25", "Write to Delta every N pages (at a file boundary)")
 
 DRY_RUN        = dbutils.widgets.get("dry_run") == "true"
 MAX_PAGES      = int(dbutils.widgets.get("max_pages") or 25)
 FORCE_FILE_IDS = {f.strip() for f in dbutils.widgets.get("force_file_ids").split(",") if f.strip()}
 RETRY_ERRORS   = dbutils.widgets.get("retry_errors") == "true"
-print(f"dry_run={DRY_RUN} max_pages={MAX_PAGES} force_file_ids={len(FORCE_FILE_IDS)} retry_errors={RETRY_ERRORS}")
+CHUNK_PAGES    = int(dbutils.widgets.get("chunk_pages") or 25)
+print(f"dry_run={DRY_RUN} max_pages={MAX_PAGES} force_file_ids={len(FORCE_FILE_IDS)} retry_errors={RETRY_ERRORS} chunk_pages={CHUNK_PAGES}")
 
 client = None
 if not DRY_RUN:
@@ -448,6 +453,79 @@ def process_page(p):
     return page_facts, calls
 
 
+def flush():
+    """Write the buffered facts, page statuses and exceptions to Delta, then clear the buffers. Called every CHUNK_PAGES pages
+    at a file boundary (so a forced file is never split across two writes) and once more at the end."""
+    # Forced re-extraction: replace the file's existing facts only now that extraction succeeded for every page of the file.
+    # Must run before the append below.
+    for fid in forced_cleanup - errored_files:
+        spark.sql(f"DELETE FROM genealogy.gold_transcript_facts WHERE file_id = '{fid}'")
+    if forced_cleanup - errored_files:
+        print(f"  Replaced existing facts for {len(forced_cleanup - errored_files)} forced file(s).")
+
+    if fact_rows:
+        schema = StructType([
+            StructField("file_id",          StringType(),    False),
+            StructField("person_gedcom_id", StringType(),    True),
+            StructField("fact_type",        StringType(),    True),
+            StructField("fact_value",       StringType(),    True),
+            StructField("fact_year",        IntegerType(),   True),
+            StructField("confidence",       StringType(),    True),
+            StructField("inferred",         BooleanType(),   True),
+            StructField("source_doc_type",  StringType(),    True),
+            StructField("extracted_at",     TimestampType(), True),
+            StructField("page_index",       IntegerType(),   True),
+            StructField("person_index",     IntegerType(),   True),
+        ])
+        spark.createDataFrame(fact_rows, schema=schema).write.format("delta").mode("append").saveAsTable("genealogy.gold_transcript_facts")
+        print(f"  Written {len(fact_rows)} fact rows to gold_transcript_facts")
+
+    if status_rows:
+        s_schema = StructType([
+            StructField("file_id", StringType(), False), StructField("page_index", IntegerType(), True),
+            StructField("status", StringType(), True), StructField("detail", StringType(), True),
+            StructField("n_calls", IntegerType(), True), StructField("n_facts", IntegerType(), True),
+            StructField("attempted_at", TimestampType(), True)])
+        # one row per page (the last wins), so a page that appears twice in the work list cannot insert two status rows
+        latest = {(r[0], r[1]): r for r in status_rows}
+        sdf = spark.createDataFrame(list(latest.values()), schema=s_schema)
+        # replace any prior row for the same page (ERROR retries, forced re-runs) so each page has exactly one status
+        sdf.createOrReplaceTempView("_new_extraction_status")
+        spark.sql("""
+          MERGE INTO genealogy.silver_fact_extraction_status t USING _new_extraction_status s
+          ON t.file_id = s.file_id AND t.page_index <=> s.page_index
+          WHEN MATCHED THEN UPDATE SET *
+          WHEN NOT MATCHED THEN INSERT *
+        """)
+        print(f"  Recorded {len(latest)} page status rows")
+
+    if exception_rows:
+        e_schema = StructType([
+            StructField("file_id", StringType(), True), StructField("file_name", StringType(), True),
+            StructField("doc_type_detected", StringType(), True), StructField("year", StringType(), True),
+            StructField("surname", StringType(), True), StructField("forename", StringType(), True),
+            StructField("candidate_count", IntegerType(), True), StructField("reason", StringType(), True),
+            StructField("candidates_considered", StringType(), True), StructField("logged_at", TimestampType(), True)])
+        # don't re-log an exception already recorded for the same file, person and reason
+        have = {(r["file_id"], r["candidates_considered"], r["reason"]) for r in spark.sql(
+            "SELECT file_id, candidates_considered, reason FROM genealogy.silver_document_match_exception WHERE reason LIKE 'FACT_EXTRACTION%'").collect()}
+        new_ex = [e[:9] + (e[9] or now(),) for e in exception_rows if (e[0], e[8], e[7]) not in have]
+        if new_ex:
+            spark.createDataFrame(new_ex, schema=e_schema).write.format("delta").mode("append").saveAsTable("genealogy.silver_document_match_exception")
+        print(f"  Logged {len(new_ex)} new rejected link(s) to silver_document_match_exception")
+
+    totals["facts"] += len(fact_rows); totals["pages"] += len(status_rows); totals["rejections"] += len(exception_rows)
+    fact_rows.clear(); status_rows.clear(); exception_rows.clear(); forced_cleanup.clear(); errored_files.clear()
+
+
+def maybe_flush(i):
+    """Flush when CHUNK_PAGES pages are buffered and the next page starts a new file (or this is the last page)."""
+    if len(status_rows) >= CHUNK_PAGES and (i == len(selected) - 1 or selected[i + 1]["file_id"] != selected[i]["file_id"]):
+        flush()
+
+
+totals = {"facts": 0, "pages": 0, "rejections": 0}
+
 if DRY_RUN:
     print("DRY RUN: no Gemini calls made and nothing written. Re-run with dry_run=false to extract.")
 else:
@@ -459,6 +537,7 @@ else:
             print(f"  ✗ ERROR: {e}")
             status_rows.append((p["file_id"], p["page_index"], "ERROR", str(e)[:1000], 0, 0, now()))
             errored_files.add(p["file_id"])
+            maybe_flush(i)
             time.sleep(REQUEST_DELAY)
             continue
 
@@ -509,79 +588,26 @@ else:
         if p["file_id"] in FORCE_FILE_IDS:
             forced_cleanup.add(p["file_id"])
         print(f"  ✓ {len(page_facts)} facts ({written} kept, {rejected} link(s) rejected), {calls} call(s)")
+        maybe_flush(i)
         if i < len(selected) - 1:
             time.sleep(REQUEST_DELAY)
     for p in no_people_pages[:MAX_PAGES]:
         status_rows.append((p["file_id"], p["page_index"], "NO_PEOPLE", "no mention rows for this page", 0, 0, now()))
 
-    print(f"\nFacts: {len(fact_rows)}  Page statuses: {len(status_rows)}  Link rejections: {len(exception_rows)}")
-
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Cell 6 — Write facts, statuses and exceptions to Delta
+# MAGIC ## Cell 6 — Final write and summary
+# MAGIC
+# MAGIC The loop above writes to Delta every `chunk_pages` pages (see `flush()`); this cell writes whatever is left and prints the run totals.
 
 # COMMAND ----------
 
 if DRY_RUN:
     print("Dry run: nothing written.")
 else:
-    # Forced re-extraction: replace the file's existing facts (legacy and any earlier page-level run) only now that extraction
-    # succeeded for every page of the file. Must run before the append below.
-    forced_cleanup -= errored_files
-    for fid in forced_cleanup:
-        spark.sql(f"DELETE FROM genealogy.gold_transcript_facts WHERE file_id = '{fid}'")
-    if forced_cleanup:
-        print(f"Replaced existing facts for {len(forced_cleanup)} forced file(s).")
-
-    if fact_rows:
-        schema = StructType([
-            StructField("file_id",          StringType(),    False),
-            StructField("person_gedcom_id", StringType(),    True),
-            StructField("fact_type",        StringType(),    True),
-            StructField("fact_value",       StringType(),    True),
-            StructField("fact_year",        IntegerType(),   True),
-            StructField("confidence",       StringType(),    True),
-            StructField("inferred",         BooleanType(),   True),
-            StructField("source_doc_type",  StringType(),    True),
-            StructField("extracted_at",     TimestampType(), True),
-            StructField("page_index",       IntegerType(),   True),
-            StructField("person_index",     IntegerType(),   True),
-        ])
-        spark.createDataFrame(fact_rows, schema=schema).write.format("delta").mode("append").saveAsTable("genealogy.gold_transcript_facts")
-        print(f"Written {len(fact_rows)} fact rows to gold_transcript_facts")
-
-    if status_rows:
-        s_schema = StructType([
-            StructField("file_id", StringType(), False), StructField("page_index", IntegerType(), True),
-            StructField("status", StringType(), True), StructField("detail", StringType(), True),
-            StructField("n_calls", IntegerType(), True), StructField("n_facts", IntegerType(), True),
-            StructField("attempted_at", TimestampType(), True)])
-        sdf = spark.createDataFrame(status_rows, schema=s_schema)
-        # replace any prior row for the same page (ERROR retries, forced re-runs) so each page has exactly one status
-        sdf.createOrReplaceTempView("_new_extraction_status")
-        spark.sql("""
-          MERGE INTO genealogy.silver_fact_extraction_status t USING _new_extraction_status s
-          ON t.file_id = s.file_id AND t.page_index <=> s.page_index
-          WHEN MATCHED THEN UPDATE SET *
-          WHEN NOT MATCHED THEN INSERT *
-        """)
-        print(f"Recorded {len(status_rows)} page status rows")
-
-    if exception_rows:
-        e_schema = StructType([
-            StructField("file_id", StringType(), True), StructField("file_name", StringType(), True),
-            StructField("doc_type_detected", StringType(), True), StructField("year", StringType(), True),
-            StructField("surname", StringType(), True), StructField("forename", StringType(), True),
-            StructField("candidate_count", IntegerType(), True), StructField("reason", StringType(), True),
-            StructField("candidates_considered", StringType(), True), StructField("logged_at", TimestampType(), True)])
-        # don't re-log an exception already recorded for the same file, person and reason
-        have = {(r["file_id"], r["candidates_considered"], r["reason"]) for r in spark.sql(
-            "SELECT file_id, candidates_considered, reason FROM genealogy.silver_document_match_exception WHERE reason LIKE 'FACT_EXTRACTION%'").collect()}
-        exception_rows = [e[:9] + (e[9] or now(),) for e in exception_rows if (e[0], e[8], e[7]) not in have]
-        if exception_rows:
-            spark.createDataFrame(exception_rows, schema=e_schema).write.format("delta").mode("append").saveAsTable("genealogy.silver_document_match_exception")
-        print(f"Logged {len(exception_rows)} new rejected/unanchored link(s) to silver_document_match_exception")
+    flush()
+    print(f"\nRun totals: {totals['facts']} fact rows, {totals['pages']} page statuses, {totals['rejections']} link rejections logged")
 
 # COMMAND ----------
 
