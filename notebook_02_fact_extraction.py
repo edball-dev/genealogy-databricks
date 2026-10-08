@@ -53,6 +53,9 @@
 # MAGIC - v2.3: Forced re-extraction replaces ALL of a file's facts (not just legacy), only when every page succeeded. Linking of
 # MAGIC         filename/primary matches to a mention (name variants, census age tie-break) lives in notebook_01 Cell 5h2, not here:
 # MAGIC         a person with no person_index is simply left unlinked.
+# MAGIC - v2.6: Retry on the google-genai SDK's own errors (APIError .code 429/500/503/504). The old decorator listed google.api_core
+# MAGIC         exceptions, which the SDK never raises, so quota errors were not retried and pages were marked ERROR (14 of ~250
+# MAGIC         pages in the first 200-page run). Backoff now up to 120s.
 # MAGIC - v2.5: Facts are de-duplicated across the pages of a file (and against facts from earlier runs); the prompt says to take
 # MAGIC         facts only from the transcript, not the people list.
 # MAGIC - v2.4: fact_year is filled from a 4-digit fact_value for birth_year/death_year/marriage_year when Gemini leaves it null
@@ -87,10 +90,11 @@ import re
 from datetime import datetime, timezone
 
 from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType, TimestampType
-from tenacity import retry, wait_random_exponential, stop_after_attempt, retry_if_exception_type
+from tenacity import retry, wait_random_exponential, stop_after_attempt, retry_if_exception
 
 from google import genai
 from google.genai import types
+from google.genai import errors as genai_errors
 from google.oauth2 import service_account
 import google.api_core.exceptions
 
@@ -331,16 +335,28 @@ def _call_gemini_once(prompt: str) -> dict:
         return {"_parse_error": True, "_raw": raw_text[:500]}
 
 
-@retry(
-    retry=retry_if_exception_type((
+def _is_retryable(exc) -> bool:
+    """429 (quota), 500/503/504 (transient server) and timeouts. The google-genai SDK raises
+    google.genai.errors.APIError (ClientError/ServerError) with the HTTP status in .code, NOT the
+    google.api_core exceptions, which is why 429s were not being retried."""
+    if isinstance(exc, genai_errors.APIError):
+        return exc.code in (429, 500, 503, 504)
+    return isinstance(exc, (
         google.api_core.exceptions.ResourceExhausted,
         google.api_core.exceptions.TooManyRequests,
         google.api_core.exceptions.DeadlineExceeded,
         google.api_core.exceptions.Cancelled,
-    )),
-    wait=wait_random_exponential(multiplier=1, max=60),
+        TimeoutError,
+    ))
+
+
+@retry(
+    retry=retry_if_exception(_is_retryable),
+    wait=wait_random_exponential(multiplier=2, max=120),
     stop=stop_after_attempt(MAX_RETRIES),
-    before_sleep=lambda rs: print(f"    Rate limited (429) — attempt {rs.attempt_number} failed, retrying..."),
+    before_sleep=lambda rs: print(
+        f"    Transient API error ({getattr(rs.outcome.exception(), 'code', type(rs.outcome.exception()).__name__)}) — attempt {rs.attempt_number} failed, retrying..."
+    ),
 )
 def call_gemini_with_retry(prompt: str) -> dict:
     return _call_gemini_once(prompt)
