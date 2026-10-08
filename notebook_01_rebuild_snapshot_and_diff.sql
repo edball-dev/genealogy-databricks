@@ -47,9 +47,10 @@ dq025_before AS (
   JOIN genealogy.silver_transcript_person_mention m
     ON m.file_id = sdp.file_id AND m.person_index = sdp.person_index AND m.page_index <=> sdp.page_index
   WHERE sdp.match_confidence IN ('HIGH', 'MEDIUM')
+    AND m.override_person_gedcom_id IS NULL
     AND c.doc_year IS NOT NULL AND m.age_years IS NOT NULL
     AND TRY_CAST(pl.birth_year AS INT) IS NOT NULL
-    AND ABS(c.doc_year - m.age_years - TRY_CAST(pl.birth_year AS INT)) > 10
+    AND ABS(c.doc_year - m.age_years - TRY_CAST(pl.birth_year AS INT)) > 5
   UNION
   SELECT sdp.file_id, sdp.person_gedcom_id
   FROM genealogy.silver_document_person_pre_rebuild sdp

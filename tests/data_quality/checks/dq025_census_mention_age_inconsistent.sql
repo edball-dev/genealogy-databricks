@@ -9,7 +9,7 @@
 --   check a census match against the mention row the matched person is linked
 --   to (silver_document_person.person_index -> silver_transcript_person_mention),
 --   using the age on the page: a mention whose age implies a birth year more
---   than 10 years from the tree's is not accepted. Two things can make that
+--   than 5 years from the tree's is not accepted. Two things can make that
 --   check fire, and both need a person to look at the image:
 --     * the OCR misread the name or age (found 2026-10-07: George Cuthbertson
 --       Sr's 1841 head read as "Thos, 64" instead of "Geo, 69"; John
@@ -23,11 +23,19 @@
 --
 --   Two reasons, one row each:
 --     LINK_AGE_MISMATCH   - the person is linked to a census mention whose age
---                           implies a birth year more than 10 years from the tree's
---                           (the same rule notebook_02 and Cells 5e-5h3 apply).
+--                           implies a birth year >5 years from the tree's
+--                           (the same rule notebook_02 and Cell 5h2 apply).
 --     NO_MATCHING_MENTION - a HIGH/MEDIUM census match with no person_index
 --                           although the file has mentions: Cell 5h2 found no
 --                           mention with this name and a consistent age.
+--
+--     OVERRIDE_CONFLICT   - a mention carries override_person_gedcom_id (hand-checked
+--                           against the image) but is linked to a different person.
+--
+--   A mention with override_person_gedcom_id set is excluded from LINK_AGE_MISMATCH: a
+--   person has confirmed it against the image (stated ages often differ from the tree
+--   by a few years). Resolve a LINK_AGE_MISMATCH row by correcting the OCR (transcript
+--   and mention row), fixing the tree birth year, or setting the override.
 --
 --   Reported at warning: a nonzero count is expected until the underlying
 --   rows are reviewed (correct the transcript and mention rows as for
@@ -55,10 +63,11 @@ JOIN genealogy.silver_transcript_person_mention m
  AND m.person_index = sdp.person_index
  AND m.page_index <=> sdp.page_index
 WHERE sdp.match_confidence IN ('HIGH', 'MEDIUM')
+  AND m.override_person_gedcom_id IS NULL
   AND c.doc_year IS NOT NULL
   AND m.age_years IS NOT NULL
   AND TRY_CAST(pl.birth_year AS INT) IS NOT NULL
-  AND ABS(c.doc_year - m.age_years - TRY_CAST(pl.birth_year AS INT)) > 10
+  AND ABS(c.doc_year - m.age_years - TRY_CAST(pl.birth_year AS INT)) > 5
 
 UNION ALL
 
@@ -75,4 +84,22 @@ WHERE sdp.match_confidence IN ('HIGH', 'MEDIUM')
   AND EXISTS (
     SELECT 1 FROM genealogy.silver_transcript_person_mention mm
     WHERE mm.file_id = sdp.file_id
-  );
+  )
+
+UNION ALL
+
+SELECT sdp.file_id, ot.file_name, sdp.person_gedcom_id, pl.display_name, sdp.match_method,
+       'OVERRIDE_CONFLICT' AS reason,
+       pl.birth_year AS tree_birth_year,
+       m.name_raw AS mention_name, m.age_years AS mention_age,
+       CAST(NULL AS INT) AS implied_birth_year
+FROM genealogy.silver_document_person sdp
+JOIN (SELECT file_id, MAX(file_name) AS file_name FROM genealogy.ocr_transcriptions GROUP BY file_id) ot
+  ON ot.file_id = sdp.file_id
+JOIN genealogy.gold_person_life pl ON pl.person_gedcom_id = sdp.person_gedcom_id
+JOIN genealogy.silver_transcript_person_mention m
+  ON m.file_id = sdp.file_id
+ AND m.person_index = sdp.person_index
+ AND m.page_index <=> sdp.page_index
+WHERE m.override_person_gedcom_id IS NOT NULL
+  AND sdp.person_gedcom_id <> m.override_person_gedcom_id;

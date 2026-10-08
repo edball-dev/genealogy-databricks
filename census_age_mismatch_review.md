@@ -1,6 +1,6 @@
 # Census age mismatches: review outcome
 
-**Update:** the age gate was then raised from 5 to 10 years (notebook_01 Cells 5e-5h3, notebook_02 `AGE_CHECK_TOLERANCE`, DQ-025). Of the 17 rows below, 9 now pass the gate: 8 of the 10 same-person rows, and the Israel/Sarah Clifford link (gap of exactly 10; the rebuild still drops it because the names no longer match). DQ-025 `LINK_AGE_MISMATCH` is now 8 rows: six different-person rows (Mary Ann Balls, Elizabeth Balls, Mary Ann Eastoe, Herbert Davis, Ann Pearson, Mary Pearson) and the two doubtful same-person rows (Thomas Cope, Susan Ambrose).
+**Update:** the age gate stays at 5 years. A same-person link whose stated age differs from the tree is accepted by setting `silver_transcript_person_mention.override_person_gedcom_id` on that mention after checking the image (notebook_01 Cell 5d2 links it without the age gate; DQ-025 excludes it). The 8 same-person rows below with a gap of 6-9 years are the first overrides. DQ-025 `LINK_AGE_MISMATCH` stays flagged for the six different-person rows (Mary Ann Balls, Elizabeth Balls, Mary Ann Eastoe, Herbert Davis, Ann Pearson, Mary Pearson), which the rebuild drops, and for the two doubtful same-person rows (Thomas Cope, Susan Ambrose) until the tree is checked. The Israel/Sarah Clifford link is dropped by the rebuild (gap 10).
 
 DQ-025 `LINK_AGE_MISMATCH` listed 41 rows. Two were corrected earlier (Pearson 1881 42→62, Ballantyne 1901 51→57); the other 39 were checked against the images in batches. Result:
 
@@ -22,7 +22,7 @@ DQ-025 `LINK_AGE_MISMATCH` listed 41 rows. Two were corrected earlier (Pearson 1
 | PEARSON_John_1841_Census | Mary Pearson (20) | Mary Pearson (1806) |
 | CLIFFORD_Edward_1841_Census | Israel Clifford (12) | Sarah Clifford (1819) |
 
-### Same person, age on the page differs from the tree (10): inside the new 10-year gate except the last two
+### Same person, age on the page differs from the tree (10): override the first 8, check the tree for the last two
 
 | Page | Page age → implied birth | Tree birth | Gap | Other censuses agree with the tree? |
 |---|---|---|---|---|
