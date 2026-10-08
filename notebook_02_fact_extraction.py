@@ -2,7 +2,7 @@
 # MAGIC %md
 # MAGIC # Notebook 02: Fact Extraction via Gemini
 # MAGIC
-# MAGIC Reads matched transcripts from silver_document_person + ocr_transcriptions, calls Gemini to extract structured facts, writes to gold_transcript_facts.
+# MAGIC Reads OCR pages and the people mentioned on them (silver_transcript_person_mention), calls Gemini once per page (or per chunk of a long page) to extract structured facts for EVERY person on the page, attaches each person's facts to the tree person linked via silver_document_person (file_id, page_index, person_index), writes to gold_transcript_facts.
 # MAGIC
 # MAGIC Run on Databricks serverless compute. Requires GCP credentials in secret scope 'genealogy', key 'gcp_service_account_json'.
 # MAGIC
@@ -33,7 +33,38 @@
 # MAGIC         actually about — now pulls the matched person's own given_name/surname
 # MAGIC         via gold_person_life, so a household member's row asks Gemini to extract
 # MAGIC         facts about *that* person, not the file's primary/filename subject.
-
+# MAGIC
+# MAGIC - v2.0: Page-level extraction (Asana 1218420653302709). Unit is the page, not (file, person, page).
+# MAGIC         Gemini is given the people on the page (person_index, name as written, role, age, detail) and returns facts per
+# MAGIC         person_index; facts reach a tree person through silver_document_person.person_index, so the filename/matcher
+# MAGIC         anchor stays and Gemini no longer hunts the page for a tree name. Unlinked mentions are extracted with a NULL
+# MAGIC         person_gedcom_id and never guessed. Long pages are chunked (no 4,000-char cut-off); page_index/person_index are
+# MAGIC         stored on each fact; no duplicates across chunks/pages. Age, name and (census) inferred birth_year come from the
+# MAGIC         mention row, not Gemini. Prompt captures birthplace, years married, children, address, narrative detail.
+# MAGIC         Cost control: dry_run widget (default true) reports page/call counts without calling Gemini; max_pages limit;
+# MAGIC         per-page status persisted in silver_fact_extraction_status (errors retried only with retry_errors=true);
+# MAGIC         census links whose mention age disagrees with the tree birth year by >5 years are logged to
+# MAGIC         silver_document_match_exception and not stored against that tree person.
+# MAGIC         Needs notebook_02_schema_and_cleanup.sql applied first.
+# MAGIC - v2.1: Align Gemini config with ocr_pipeline: model gemini-3.1-pro-preview (gemini-3-pro-preview returns 404 on this
+# MAGIC         project), thinking_level LOW, max_output_tokens 65536.
+# MAGIC - v2.2: force_file_ids now limits the run to exactly those files (previously they were only added to the backlog, so
+# MAGIC         max_pages could be spent on other files first).
+# MAGIC - v2.3: Forced re-extraction replaces ALL of a file's facts (not just legacy), only when every page succeeded. Linking of
+# MAGIC         filename/primary matches to a mention (name variants, census age tie-break) lives in notebook_01 Cell 5h2, not here:
+# MAGIC         a person with no person_index is simply left unlinked.
+# MAGIC - v2.8: A mention with silver_transcript_person_mention.override_person_gedcom_id set (hand-confirmed against the image) is accepted for that
+# MAGIC         person without the age check, and rejected for anyone else. Needs the column added (see notebook_01 Cell 5d2).
+# MAGIC - v2.7: Facts, page statuses and exceptions are written to Delta every chunk_pages (default 25) pages at a file boundary, not once
+# MAGIC         at the end, so a stuck or killed run loses at most one chunk. Status rows are de-duplicated per (file, page).
+# MAGIC - v2.6: Retry on the google-genai SDK's own errors (APIError .code 429/500/503/504). The old decorator listed google.api_core
+# MAGIC         exceptions, which the SDK never raises, so quota errors were not retried and pages were marked ERROR (14 of ~250
+# MAGIC         pages in the first 200-page run). Backoff now up to 120s.
+# MAGIC - v2.5: Facts are de-duplicated across the pages of a file (and against facts from earlier runs); the prompt says to take
+# MAGIC         facts only from the transcript, not the people list.
+# MAGIC - v2.4: fact_year is filled from a 4-digit fact_value for birth_year/death_year/marriage_year when Gemini leaves it null
+# MAGIC         (notebook_03 compares on fact_year; a NULL gave CONFLICT with no severity).
+# MAGIC
 # COMMAND ----------
 
 # MAGIC %md
@@ -43,10 +74,17 @@
 
 # MAGIC %pip install google-genai tenacity
 
+
+
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Cell 2 — Imports and config
+# MAGIC ## Cell 2 — Imports, config and run controls
+# MAGIC
+# MAGIC Widgets: `dry_run` (default true: counts pages/calls, no Gemini call, no writes), `max_pages` (hard cap on pages per run),
+# MAGIC `force_file_ids` (comma-separated file_ids to re-extract; the run is limited to them and their existing facts are replaced after a successful extraction),
+# MAGIC `retry_errors` (re-run pages whose status is ERROR; off by default so errors are not silently re-billed),
+# MAGIC `chunk_pages` (facts, statuses and exceptions are written to Delta every N pages at a file boundary, so a stuck or killed run loses at most one chunk).
 
 # COMMAND ----------
 
@@ -57,127 +95,205 @@ import re
 from datetime import datetime, timezone
 
 from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType, TimestampType
-from tenacity import retry, wait_random_exponential, stop_after_attempt, retry_if_exception_type
+from tenacity import retry, wait_random_exponential, stop_after_attempt, retry_if_exception
 
 from google import genai
 from google.genai import types
+from google.genai import errors as genai_errors
 from google.oauth2 import service_account
 import google.api_core.exceptions
 
 GCP_PROJECT    = "genealogy-488213"
 GCP_LOCATION   = "global"
-GEMINI_MODEL   = "gemini-3-pro-preview"   # swap to gemini-3-flash-preview if cost is a concern
+GEMINI_MODEL   = "gemini-3.1-pro-preview"   # same model as ocr_pipeline VERTEX_MODEL; gemini-3-pro-preview 404s on this project
 REQUEST_DELAY  = 4
 MAX_RETRIES    = 5
+MAX_CHUNK_CHARS = 30000     # a page longer than this is split on line boundaries into several calls
+AGE_CHECK_DOC_TYPES = {"Census"}   # doc types where mention age is a true age at document date
+YEAR_FACT_TYPES = {"birth_year", "death_year", "marriage_year"}   # fact_year is derived from fact_value for these
+AGE_CHECK_TOLERANCE = 5            # years between (doc year - mention age) and tree birth year before a link is rejected
 
-# Build explicit credentials and pass to the google-genai client.
-# google-genai replaces the deprecated vertexai.generative_models SDK (removed June 2026).
-creds_b64  = dbutils.secrets.get(scope="genealogy", key="gcp_service_account_json")
-creds_json = base64.b64decode(creds_b64).decode("utf-8")
-sa_info    = json.loads(creds_json)
+dbutils.widgets.dropdown("dry_run", "true", ["true", "false"], "Dry run (no Gemini calls, no writes)")
+dbutils.widgets.text("max_pages", "25", "Max pages to process this run")
+dbutils.widgets.text("force_file_ids", "", "Comma-separated file_ids to re-extract")
+dbutils.widgets.dropdown("retry_errors", "false", ["true", "false"], "Retry pages with status ERROR")
+dbutils.widgets.text("chunk_pages", "25", "Write to Delta every N pages (at a file boundary)")
 
-credentials = service_account.Credentials.from_service_account_info(
-    sa_info,
-    scopes=["https://www.googleapis.com/auth/cloud-platform"]
-)
+DRY_RUN        = dbutils.widgets.get("dry_run") == "true"
+MAX_PAGES      = int(dbutils.widgets.get("max_pages") or 25)
+FORCE_FILE_IDS = {f.strip() for f in dbutils.widgets.get("force_file_ids").split(",") if f.strip()}
+RETRY_ERRORS   = dbutils.widgets.get("retry_errors") == "true"
+CHUNK_PAGES    = int(dbutils.widgets.get("chunk_pages") or 25)
+print(f"dry_run={DRY_RUN} max_pages={MAX_PAGES} force_file_ids={len(FORCE_FILE_IDS)} retry_errors={RETRY_ERRORS} chunk_pages={CHUNK_PAGES}")
 
-client = genai.Client(
-    vertexai=True,
-    project=GCP_PROJECT,
-    location=GCP_LOCATION,
-    credentials=credentials,
-)
-print(f"google-genai client initialised. Model: {GEMINI_MODEL}")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Cell 3 — Load matched transcripts not yet fact-extracted
-
-# COMMAND ----------
-
-transcripts_df = spark.sql("""
-  SELECT
-    sdp.file_id,
-    sdp.person_gedcom_id,
-    sdp.match_confidence,
-    pl.given_name AS forename,
-    pl.surname,
-    ot.file_name,
-    ot.year,
-    ot.doc_type_detected,
-    ot.transcribed_text,
-    ot.personal_names,
-    ot.locations
-  FROM genealogy.silver_document_person sdp
-  JOIN genealogy.ocr_transcriptions ot ON sdp.file_id = ot.file_id
-  JOIN genealogy.gold_person_life pl ON pl.person_gedcom_id = sdp.person_gedcom_id
-  WHERE sdp.match_confidence IN ('HIGH', 'MEDIUM')
-    AND ot.transcribed_text IS NOT NULL
-    -- Scoped per (file_id, person_gedcom_id), not just file_id: a household-
-    -- member row added to silver_document_person after this file's primary
-    -- person was already fact-extracted (Cell 5e in notebook_01 — census/
-    -- burial collaterals; Cell 5b's spouse-inference rows have the same
-    -- shape) must still get its own extraction pass, since the file_id alone
-    -- already having gold_transcript_facts rows says nothing about this
-    -- particular person.
-    AND NOT EXISTS (
-      SELECT 1 FROM genealogy.gold_transcript_facts gtf
-      WHERE gtf.file_id = sdp.file_id
-        AND gtf.person_gedcom_id = sdp.person_gedcom_id
+client = None
+if not DRY_RUN:
+    # Build explicit credentials and pass to the google-genai client.
+    # google-genai replaces the deprecated vertexai.generative_models SDK (removed June 2026).
+    creds_b64  = dbutils.secrets.get(scope="genealogy", key="gcp_service_account_json")
+    sa_info    = json.loads(base64.b64decode(creds_b64).decode("utf-8"))
+    credentials = service_account.Credentials.from_service_account_info(
+        sa_info, scopes=["https://www.googleapis.com/auth/cloud-platform"]
     )
-  ORDER BY sdp.match_confidence DESC, ot.file_name
-""")
-
-records = transcripts_df.collect()
-print(f"Transcripts to process: {len(records)}")
-for r in records:
-    print(f"  {r['file_name']} -> {r['person_gedcom_id']} ({r['match_confidence']})")
+    client = genai.Client(vertexai=True, project=GCP_PROJECT, location=GCP_LOCATION, credentials=credentials)
+    print(f"google-genai client initialised. Model: {GEMINI_MODEL}")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Cell 4 — Fact extraction prompt and Gemini call
+# MAGIC ## Cell 3 — Build the work list: pages, their people, and the tree links
+# MAGIC
+# MAGIC A page is in scope when it has at least one HIGH/MEDIUM `silver_document_person` row and no row in `silver_fact_extraction_status`
+# MAGIC (or an ERROR row with `retry_errors`, or its file is in `force_file_ids`).
+# MAGIC Mentions with NULL `page_index` (most of them) belong to the file's only page, or, on a multi-page file, are offered to every page and
+# MAGIC Gemini returns only those present in the excerpt; duplicates are dropped on (person_index, fact_type, fact_value).
 
 # COMMAND ----------
 
-FACT_EXTRACTION_PROMPT = """You are a genealogy research assistant. Extract structured facts about the NAMED SUBJECT from this historical document transcript.
+status_filter = "st.status = 'ERROR'" if RETRY_ERRORS else "FALSE"
+force_list = ",".join("'" + f.replace("'", "") + "'" for f in FORCE_FILE_IDS) or "''"
 
-NAMED SUBJECT: {forename} {surname} (document year: {doc_year}, document type: {doc_type})
+# When force_file_ids is set the run is limited to exactly those files (status ignored); otherwise the normal backlog applies.
+scope_filter = (f"ot.file_id IN ({force_list})" if FORCE_FILE_IDS
+                else f"(st.file_id IS NULL OR {status_filter})")
+
+pages_df = spark.sql(f"""
+  SELECT ot.file_id, ot.file_name, ot.page_index, ot.year, ot.doc_type_detected,
+         ot.transcribed_text, ot.personal_names, ot.locations,
+         COUNT(*) OVER (PARTITION BY ot.file_id) AS n_pages_in_file
+  FROM genealogy.ocr_transcriptions ot
+  LEFT JOIN genealogy.silver_fact_extraction_status st
+         ON st.file_id = ot.file_id AND st.page_index <=> ot.page_index
+  WHERE ot.transcribed_text IS NOT NULL
+    AND EXISTS (SELECT 1 FROM genealogy.silver_document_person sdp
+                WHERE sdp.file_id = ot.file_id AND sdp.match_confidence IN ('HIGH', 'MEDIUM'))
+    AND {scope_filter}
+  ORDER BY ot.file_name, ot.page_index
+""")
+pages = [r.asDict() for r in pages_df.collect()]
+
+file_ids = sorted({p["file_id"] for p in pages})
+mentions_by_file, links_by_file = {}, {}
+if file_ids:
+    ids_sql = ",".join("'" + f + "'" for f in file_ids)
+    for m in spark.sql(f"""
+        SELECT file_id, page_index, person_index, name_raw, role_in_record, age_raw, age_years, dob_raw, detail, override_person_gedcom_id
+        FROM genealogy.silver_transcript_person_mention WHERE file_id IN ({ids_sql})
+        ORDER BY file_id, person_index
+    """).collect():
+        mentions_by_file.setdefault(m["file_id"], []).append(m.asDict())
+    # person_gedcom_id for each mention, via the key silver_document_person carries (null-safe on page_index)
+    for l in spark.sql(f"""
+        SELECT sdp.file_id, sdp.page_index, sdp.person_index, sdp.person_gedcom_id, pl.birth_year AS tree_birth_year
+        FROM genealogy.silver_document_person sdp
+        LEFT JOIN genealogy.gold_person_life pl ON pl.person_gedcom_id = sdp.person_gedcom_id
+        WHERE sdp.file_id IN ({ids_sql}) AND sdp.match_confidence IN ('HIGH', 'MEDIUM')
+          AND sdp.person_index IS NOT NULL
+    """).collect():
+        links_by_file.setdefault(l["file_id"], []).append(l.asDict())
+
+# Legacy (page-level-unaware) facts: a (file, person) that already has rows is not re-written unless the file is forced.
+legacy_pairs = set()
+if file_ids:
+    for r in spark.sql(f"""
+        SELECT DISTINCT file_id, person_gedcom_id FROM genealogy.gold_transcript_facts
+        WHERE file_id IN ({ids_sql}) AND person_gedcom_id IS NOT NULL
+    """).collect():
+        legacy_pairs.add((r["file_id"], r["person_gedcom_id"]))
+
+
+# Facts already stored for a file (earlier pages or earlier runs) so the same fact is never written twice across pages.
+# Forced files are replaced wholesale, so they start empty.
+seen_facts = {}
+if file_ids:
+    for r in spark.sql(f"""
+        SELECT file_id, person_index, fact_type, fact_value FROM genealogy.gold_transcript_facts
+        WHERE file_id IN ({ids_sql}) AND person_index IS NOT NULL
+    """).collect():
+        if r["file_id"] not in FORCE_FILE_IDS:
+            seen_facts.setdefault(r["file_id"], set()).add((r["person_index"], r["fact_type"], str(r["fact_value"]).strip().lower()))
+
+def mentions_for_page(p):
+    ms = mentions_by_file.get(p["file_id"], [])
+    out = [m for m in ms if m["page_index"] is not None and m["page_index"] == p["page_index"]]
+    out += [m for m in ms if m["page_index"] is None]   # unknown page: single-page file => this page; multi-page => offered, Gemini filters
+    return out
+
+
+def chunk_text(text, limit=MAX_CHUNK_CHARS):
+    if len(text) <= limit:
+        return [text]
+    chunks, cur, size = [], [], 0
+    for line in text.split("\n"):
+        while len(line) > limit:                      # pathological single line
+            if cur: chunks.append("\n".join(cur)); cur, size = [], 0
+            chunks.append(line[:limit]); line = line[limit:]
+        if size + len(line) + 1 > limit and cur:
+            chunks.append("\n".join(cur)); cur, size = [], 0
+        cur.append(line); size += len(line) + 1
+    if cur:
+        chunks.append("\n".join(cur))
+    return chunks
+
+
+work = []
+for p in pages:
+    p["mentions"] = mentions_for_page(p)
+    p["chunks"] = chunk_text(p["transcribed_text"])
+    if p["mentions"]:
+        work.append(p)
+    else:
+        p["no_people"] = True
+
+no_people_pages = [p for p in pages if p.get("no_people")]
+selected = work[:MAX_PAGES]
+
+n_calls = sum(len(p["chunks"]) for p in selected)
+n_chars = sum(len(p["transcribed_text"]) for p in selected)
+print(f"Pages in scope (all runs): {len(work)}  (+{len(no_people_pages)} with no mentions, would be marked NO_PEOPLE)")
+print(f"This run (max_pages={MAX_PAGES}): {len(selected)} pages, {n_calls} Gemini calls, {n_chars:,} transcript chars")
+print(f"Whole backlog: {sum(len(p['chunks']) for p in work)} calls, {sum(len(p['transcribed_text']) for p in work):,} chars")
+
+# Compare with the old per-person design on the same pages: one call per linked (file, person, page)
+linked_pairs = {(l["file_id"], l["person_gedcom_id"]) for p in selected for l in links_by_file.get(p["file_id"], [])}
+print(f"Old per-person design for the same files: ~{sum(len(p['chunks']) * max(1, len([l for l in links_by_file.get(p['file_id'], [])])) for p in selected)} calls ({len(linked_pairs)} file-person pairs)")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Cell 4 — Prompt and Gemini call
+
+# COMMAND ----------
+
+FACT_EXTRACTION_PROMPT = """You are a genealogy research assistant. Extract structured facts about EVERY person listed below from this historical document transcript.
+
+DOCUMENT: type {doc_type}, year {doc_year}{chunk_note}
+
+PEOPLE ON THIS PAGE (already identified; person_index is the key you must return):
+{people_block}
 
 TRANSCRIPT:
 {transcript_text}
 
 ADDITIONAL CONTEXT:
-- Personal names mentioned: {personal_names}
 - Locations mentioned: {locations}
 
 INSTRUCTIONS:
-1. Focus only on facts directly about the named subject ({forename} {surname}).
-2. For census records, the subject may be head of household, a child, or a spouse.
-3. Extract the following fact types where present:
-   - birth_year: year of birth as a 4-digit number
-   - birth_place: place of birth as written in the document
-   - death_year: year of death
-   - death_place: place of death
-   - marriage_year: year of marriage
-   - marriage_place: place of marriage
-   - occupation: occupation or trade as written — do NOT extract military ranks (e.g. Pte, Cpl, Sgt, Lt) as occupations; these are ranks, not trades
-   - forename: forename as written (may differ from filename)
-   - surname: surname as written (may differ from filename)
-   - residence_place: address or place of residence at time of document
-   - age_at_doc: age as stated in the document (integer as string)
-   - father_name: father's name if stated
-   - mother_name: mother's name if stated
-   - spouse_name: spouse's name if stated
-4. Assign confidence: high (clearly stated), medium (inferred/partially legible), low (uncertain).
-5. Set `inferred` to true if the fact is derived from context rather than explicitly stated.
-   Examples of inferred facts:
-   - birth_year calculated from an age stated in the document (e.g. age 49 in an 1891 census → birth_year 1842)
-   - birth_place assumed from a residence_place with no direct statement
-   - occupation assumed from a title or honorific rather than a stated trade
-   Directly stated facts (e.g. "born 1842", "born in Nottingham") should have inferred: false.
-6. Only include facts you can find evidence for in the transcript. Do NOT invent facts.
+1. Return facts for each listed person, keyed by person_index. Read each person's own entry, not another person's: where several people share a first name or surname (father and son, two Georges), use the listed age and role to tell them apart.
+2. If a listed person does not appear in this transcript excerpt, omit them. Do not invent people or facts. Take facts only from the TRANSCRIPT: the people list says who is who, and its details are already recorded elsewhere, so do not repeat them for a person who is not in this excerpt.
+3. Do NOT return forename, surname or age_at_doc: they are already recorded.
+4. Extract these fact types where present:
+   - birth_year (4-digit), birth_place, death_year, death_place, marriage_year, marriage_place
+   - occupation: as written. Do NOT extract military ranks (Pte, Cpl, Sgt, Lt) as occupations
+   - residence_place: address or place of residence at the time of the document
+   - marital_status (e.g. Married, Widow, Unmarried)
+   - years_married: number of years married, if stated
+   - relationship_to_head: for households
+   - father_name, mother_name, spouse_name
+   - child_name: one fact per child named or listed for this person (also children born alive / still living counts as child_count)
+   - narrative_detail: any other interesting detail about this person stated in the document (cause of death, military service, illness, disability, lodgers, employer, reasons for the event). One concise sentence per fact.
+5. Assign confidence: high (clearly stated), medium (partially legible), low (uncertain).
+6. Set `inferred` true if derived from context rather than stated (e.g. birth_year from an age). Directly stated facts are inferred false.
 
 Your response must be a single JSON object and nothing else.
 Do not include any text, explanation, or commentary before or after the JSON.
@@ -185,190 +301,321 @@ Do not wrap the JSON in markdown code fences.
 Your entire response must be valid JSON starting with {{ and ending with }}.
 
 {{
-  "subject_confirmed": true,
-  "subject_notes": "",
-  "facts": [
-    {{"fact_type": "birth_year", "fact_value": "1842", "fact_year": 1842, "confidence": "high", "inferred": false}},
-    {{"fact_type": "birth_year", "fact_value": "1842", "fact_year": 1842, "confidence": "medium", "inferred": true}},
-    {{"fact_type": "birth_place", "fact_value": "Nottingham", "fact_year": null, "confidence": "high", "inferred": false}}
+  "people": [
+    {{"person_index": 0,
+      "facts": [
+        {{"fact_type": "birth_place", "fact_value": "Nottingham", "fact_year": null, "confidence": "high", "inferred": false}},
+        {{"fact_type": "occupation", "fact_value": "Boot Maker", "fact_year": null, "confidence": "high", "inferred": false}}
+      ]}}
   ]
 }}"""
 
 
 def extract_json(text: str) -> dict:
-    """
-    Robustly extract a JSON object from Gemini's response text.
-    Finds the outermost { ... } regardless of any surrounding text,
-    preamble sentences, or markdown fences — consistent with ocr_pipeline v3.
-    """
+    """Outermost { ... } regardless of surrounding text or fences — consistent with ocr_pipeline v3."""
     match = re.search(r'\{.*\}', text, re.DOTALL)
     if match:
         return json.loads(match.group(0))
-    return json.loads(text)  # Let json.loads raise a clear error if no match
+    return json.loads(text)
 
 
 def _call_gemini_once(prompt: str) -> dict:
-    """
-    Single attempt to call Gemini for fact extraction.
-    Separated from retry logic so tenacity can wrap it cleanly.
-    Returns parsed dict, or {"_safety_blocked": True} if content is blocked.
-    Uses google-genai SDK (replaces deprecated vertexai.generative_models).
-    """
     response = client.models.generate_content(
         model=GEMINI_MODEL,
         contents=prompt,
         config=types.GenerateContentConfig(
             temperature=0.1,
-            max_output_tokens=8192,
-            # thinking_config=types.ThinkingConfig(thinking_level="LOW"), # reduce Gemini 3 thinking to keep token use down - uncomment if token count is too high
-            http_options=types.HttpOptions(timeout=120000),  # 2 minutes in milliseconds
+            max_output_tokens=65536,   # as ocr_pipeline; thinking tokens count against this
+            thinking_config=types.ThinkingConfig(thinking_level="LOW"),   # as ocr_pipeline: keeps Gemini 3 thinking (and cost) down
+            http_options=types.HttpOptions(timeout=180000),
         ),
     )
-
-    # Safety block detection
     if not response.candidates:
         return {"_safety_blocked": True}
     candidate = response.candidates[0]
     if not candidate.content or not candidate.content.parts:
-        return {
-            "_safety_blocked": True,
-            "_finish_reason": str(getattr(candidate, "finish_reason", "unknown")),
-        }
-
+        return {"_safety_blocked": True, "_finish_reason": str(getattr(candidate, "finish_reason", "unknown"))}
     raw_text = response.text.strip()
-
     try:
         return extract_json(raw_text)
     except (json.JSONDecodeError, ValueError):
-        # Preserve the raw response rather than silently losing it
-        return {
-            "subject_confirmed": False,
-            "subject_notes": f"Gemini response could not be parsed as JSON — raw text: {raw_text[:500]}",
-            "facts": [],
-        }
+        return {"_parse_error": True, "_raw": raw_text[:500]}
+
+
+def _is_retryable(exc) -> bool:
+    """429 (quota), 500/503/504 (transient server) and timeouts. The google-genai SDK raises
+    google.genai.errors.APIError (ClientError/ServerError) with the HTTP status in .code, NOT the
+    google.api_core exceptions, which is why 429s were not being retried."""
+    if isinstance(exc, genai_errors.APIError):
+        return exc.code in (429, 500, 503, 504)
+    return isinstance(exc, (
+        google.api_core.exceptions.ResourceExhausted,
+        google.api_core.exceptions.TooManyRequests,
+        google.api_core.exceptions.DeadlineExceeded,
+        google.api_core.exceptions.Cancelled,
+        TimeoutError,
+    ))
 
 
 @retry(
-    retry=retry_if_exception_type((
-        google.api_core.exceptions.ResourceExhausted,  # 429
-        google.api_core.exceptions.TooManyRequests,
-        google.api_core.exceptions.DeadlineExceeded,   # 504
-        google.api_core.exceptions.Cancelled,          # 499
-    )),
-    wait=wait_random_exponential(multiplier=1, max=60),
+    retry=retry_if_exception(_is_retryable),
+    wait=wait_random_exponential(multiplier=2, max=120),
     stop=stop_after_attempt(MAX_RETRIES),
     before_sleep=lambda rs: print(
-        f"    Rate limited (429) — attempt {rs.attempt_number} failed, retrying..."
+        f"    Transient API error ({getattr(rs.outcome.exception(), 'code', type(rs.outcome.exception()).__name__)}) — attempt {rs.attempt_number} failed, retrying..."
     ),
 )
 def call_gemini_with_retry(prompt: str) -> dict:
-    """
-    Call Gemini with tenacity exponential backoff on 429/quota errors.
-    Non-429 errors are raised immediately without retry.
-    """
     return _call_gemini_once(prompt)
 
 
-def extract_facts(record):
-    """
-    Build prompt, call Gemini, parse response into fact rows.
-    Returns (list_of_fact_dicts, subject_confirmed, subject_notes).
-    """
-    prompt = FACT_EXTRACTION_PROMPT.format(
-        forename        = record["forename"] or "",
-        surname         = record["surname"] or "",
-        doc_year        = record["year"] or "",
-        doc_type        = record["doc_type_detected"] or "Unknown",
-        transcript_text = (record["transcribed_text"] or "")[:4000],
-        personal_names  = record["personal_names"] or "[]",
-        locations       = record["locations"] or "[]"
-    )
+def people_block(mentions):
+    lines = []
+    for m in mentions:
+        bits = [f"person_index {m['person_index']}: {m['name_raw'] or '?'}"]
+        if m["role_in_record"]: bits.append(f"role {m['role_in_record']}")
+        if m["age_raw"]:        bits.append(f"age {m['age_raw']}")
+        if m["dob_raw"]:        bits.append(f"born {m['dob_raw']}")
+        if m["detail"]:         bits.append(f"detail: {m['detail']}")
+        lines.append("- " + "; ".join(bits))
+    return "\n".join(lines)
 
-    parsed = call_gemini_with_retry(prompt)
 
-    if parsed.get("_safety_blocked"):
-        return [], False, f"Safety blocked (finish_reason: {parsed.get('_finish_reason', 'unknown')})"
-
-    rows = []
-    for fact in parsed.get("facts", []):
-        rows.append({
-            "file_id":          record["file_id"],
-            "person_gedcom_id": record["person_gedcom_id"],
-            "fact_type":        fact.get("fact_type"),
-            "fact_value":       fact.get("fact_value"),
-            "fact_year":        fact.get("fact_year"),
-            "confidence":       fact.get("confidence", "medium"),
-            "inferred":         bool(fact.get("inferred", False)),
-            "source_doc_type":  record["doc_type_detected"],
-            "extracted_at":     datetime.now(timezone.utc),
-        })
-    return rows, parsed.get("subject_confirmed", True), parsed.get("subject_notes", "")
-
+def derived_facts(m, doc_year, doc_type):
+    """Facts taken from the mention row, no Gemini call. Birth year only where the age is a true age at the document date."""
+    out = []
+    if m["name_raw"]:
+        out.append(("name_as_written", m["name_raw"], None, "high", False))
+    if m["age_years"] is not None:
+        out.append(("age_at_doc", str(m["age_years"]), None, "high", False))
+        if doc_type in AGE_CHECK_DOC_TYPES and str(doc_year or "").isdigit():
+            by = int(doc_year) - int(m["age_years"])
+            out.append(("birth_year", str(by), by, "medium", True))
+    return out
 
 print("Functions defined.")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Cell 5 — Main extraction loop
+# MAGIC ## Cell 5 — Extraction loop (skipped entirely on a dry run)
 
 # COMMAND ----------
 
-all_facts = []
-errors    = []
-skipped   = []
+fact_rows, status_rows, exception_rows, forced_cleanup, errored_files = [], [], [], set(), set()
+now = lambda: datetime.now(timezone.utc)
 
-for i, record in enumerate(records):
-    file_name = record["file_name"]
-    print(f"[{i+1}/{len(records)}] {file_name}")
-    try:
-        facts, subject_confirmed, subject_notes = extract_facts(record)
-        if not subject_confirmed:
-            print(f"  ⚠ Subject uncertain: {subject_notes} — skipping")
-            skipped.append({"file_id": record["file_id"], "reason": subject_notes})
+
+def accepted_link(p, m, link):
+    """Deterministic anchor check: a census link whose mention age is >AGE_CHECK_TOLERANCE years from the tree birth year is rejected.
+    A mention with override_person_gedcom_id set was checked by hand: it is accepted for that person, with no age check, and for nobody else."""
+    ov = m.get("override_person_gedcom_id")
+    if ov:
+        if ov == link["person_gedcom_id"]:
+            return True, ""
+        return False, f"mention {m['name_raw']} is overridden to {ov}"
+    if p["doc_type_detected"] in AGE_CHECK_DOC_TYPES and m["age_years"] is not None \
+       and link["tree_birth_year"] is not None and str(p["year"] or "").isdigit():
+        implied = int(p["year"]) - int(m["age_years"])
+        if abs(implied - int(link["tree_birth_year"])) > AGE_CHECK_TOLERANCE:
+            return False, f"mention {m['name_raw']} age {m['age_years']} implies b.{implied}; tree b.{link['tree_birth_year']}"
+    return True, ""
+
+
+def process_page(p):
+    ms = p["mentions"]
+    by_idx = {m["person_index"]: m for m in ms}
+    seen, page_facts, calls = set(), [], 0
+    for ci, chunk in enumerate(p["chunks"]):
+        note = f", part {ci+1} of {len(p['chunks'])} of a long page" if len(p["chunks"]) > 1 else ""
+        prompt = FACT_EXTRACTION_PROMPT.format(
+            doc_type=p["doc_type_detected"] or "Unknown", doc_year=p["year"] or "", chunk_note=note,
+            people_block=people_block(ms), transcript_text=chunk, locations=p["locations"] or "[]")
+        parsed = call_gemini_with_retry(prompt)
+        calls += 1
+        if parsed.get("_safety_blocked"):
+            raise RuntimeError(f"Safety blocked (finish_reason: {parsed.get('_finish_reason', 'unknown')})")
+        if parsed.get("_parse_error"):
+            raise RuntimeError(f"Unparseable response: {parsed['_raw']}")
+        for person in parsed.get("people", []):
+            pi = person.get("person_index")
+            if pi not in by_idx:
+                continue
+            for f in person.get("facts", []):
+                key = (pi, f.get("fact_type"), str(f.get("fact_value")).strip().lower())
+                if key in seen:
+                    continue
+                seen.add(key)
+                page_facts.append((pi, f.get("fact_type"), f.get("fact_value"), f.get("fact_year"),
+                                   f.get("confidence", "medium"), bool(f.get("inferred", False))))
+        if ci < len(p["chunks"]) - 1:
+            time.sleep(REQUEST_DELAY)
+    # mention-derived facts (no Gemini); only for mentions Gemini saw on this page, or any mention when the file has one page
+    present = {pi for pi, *_ in page_facts}
+    for m in ms:
+        if m["person_index"] in present or p["n_pages_in_file"] == 1:
+            for t, v, y, c, inf in derived_facts(m, p["year"], p["doc_type_detected"]):
+                if (m["person_index"], t, v.strip().lower()) not in seen:
+                    seen.add((m["person_index"], t, v.strip().lower()))
+                    page_facts.append((m["person_index"], t, v, y, c, inf))
+    return page_facts, calls
+
+
+def flush():
+    """Write the buffered facts, page statuses and exceptions to Delta, then clear the buffers. Called every CHUNK_PAGES pages
+    at a file boundary (so a forced file is never split across two writes) and once more at the end."""
+    # Forced re-extraction: replace the file's existing facts only now that extraction succeeded for every page of the file.
+    # Must run before the append below.
+    for fid in forced_cleanup - errored_files:
+        spark.sql(f"DELETE FROM genealogy.gold_transcript_facts WHERE file_id = '{fid}'")
+    if forced_cleanup - errored_files:
+        print(f"  Replaced existing facts for {len(forced_cleanup - errored_files)} forced file(s).")
+
+    if fact_rows:
+        schema = StructType([
+            StructField("file_id",          StringType(),    False),
+            StructField("person_gedcom_id", StringType(),    True),
+            StructField("fact_type",        StringType(),    True),
+            StructField("fact_value",       StringType(),    True),
+            StructField("fact_year",        IntegerType(),   True),
+            StructField("confidence",       StringType(),    True),
+            StructField("inferred",         BooleanType(),   True),
+            StructField("source_doc_type",  StringType(),    True),
+            StructField("extracted_at",     TimestampType(), True),
+            StructField("page_index",       IntegerType(),   True),
+            StructField("person_index",     IntegerType(),   True),
+        ])
+        spark.createDataFrame(fact_rows, schema=schema).write.format("delta").mode("append").saveAsTable("genealogy.gold_transcript_facts")
+        print(f"  Written {len(fact_rows)} fact rows to gold_transcript_facts")
+
+    if status_rows:
+        s_schema = StructType([
+            StructField("file_id", StringType(), False), StructField("page_index", IntegerType(), True),
+            StructField("status", StringType(), True), StructField("detail", StringType(), True),
+            StructField("n_calls", IntegerType(), True), StructField("n_facts", IntegerType(), True),
+            StructField("attempted_at", TimestampType(), True)])
+        # one row per page (the last wins), so a page that appears twice in the work list cannot insert two status rows
+        latest = {(r[0], r[1]): r for r in status_rows}
+        sdf = spark.createDataFrame(list(latest.values()), schema=s_schema)
+        # replace any prior row for the same page (ERROR retries, forced re-runs) so each page has exactly one status
+        sdf.createOrReplaceTempView("_new_extraction_status")
+        spark.sql("""
+          MERGE INTO genealogy.silver_fact_extraction_status t USING _new_extraction_status s
+          ON t.file_id = s.file_id AND t.page_index <=> s.page_index
+          WHEN MATCHED THEN UPDATE SET *
+          WHEN NOT MATCHED THEN INSERT *
+        """)
+        print(f"  Recorded {len(latest)} page status rows")
+
+    if exception_rows:
+        e_schema = StructType([
+            StructField("file_id", StringType(), True), StructField("file_name", StringType(), True),
+            StructField("doc_type_detected", StringType(), True), StructField("year", StringType(), True),
+            StructField("surname", StringType(), True), StructField("forename", StringType(), True),
+            StructField("candidate_count", IntegerType(), True), StructField("reason", StringType(), True),
+            StructField("candidates_considered", StringType(), True), StructField("logged_at", TimestampType(), True)])
+        # don't re-log an exception already recorded for the same file, person and reason
+        have = {(r["file_id"], r["candidates_considered"], r["reason"]) for r in spark.sql(
+            "SELECT file_id, candidates_considered, reason FROM genealogy.silver_document_match_exception WHERE reason LIKE 'FACT_EXTRACTION%'").collect()}
+        new_ex = [e[:9] + (e[9] or now(),) for e in exception_rows if (e[0], e[8], e[7]) not in have]
+        if new_ex:
+            spark.createDataFrame(new_ex, schema=e_schema).write.format("delta").mode("append").saveAsTable("genealogy.silver_document_match_exception")
+        print(f"  Logged {len(new_ex)} new rejected link(s) to silver_document_match_exception")
+
+    totals["facts"] += len(fact_rows); totals["pages"] += len(status_rows); totals["rejections"] += len(exception_rows)
+    fact_rows.clear(); status_rows.clear(); exception_rows.clear(); forced_cleanup.clear(); errored_files.clear()
+
+
+def maybe_flush(i):
+    """Flush when CHUNK_PAGES pages are buffered and the next page starts a new file (or this is the last page)."""
+    if len(status_rows) >= CHUNK_PAGES and (i == len(selected) - 1 or selected[i + 1]["file_id"] != selected[i]["file_id"]):
+        flush()
+
+
+totals = {"facts": 0, "pages": 0, "rejections": 0}
+
+if DRY_RUN:
+    print("DRY RUN: no Gemini calls made and nothing written. Re-run with dry_run=false to extract.")
+else:
+    for i, p in enumerate(selected):
+        print(f"[{i+1}/{len(selected)}] {p['file_name']} page {p['page_index']} ({len(p['mentions'])} people, {len(p['chunks'])} chunk(s))")
+        try:
+            page_facts, calls = process_page(p)
+        except Exception as e:
+            print(f"  ✗ ERROR: {e}")
+            status_rows.append((p["file_id"], p["page_index"], "ERROR", str(e)[:1000], 0, 0, now()))
+            errored_files.add(p["file_id"])
+            maybe_flush(i)
             time.sleep(REQUEST_DELAY)
             continue
-        all_facts.extend(facts)
-        print(f"  ✓ {len(facts)} facts extracted")
-    except Exception as e:
-        print(f"  ✗ ERROR: {e}")
-        errors.append({"file_id": record["file_id"], "error": str(e)})
 
-    if i < len(records) - 1:
-        time.sleep(REQUEST_DELAY)
+        gemini_returned_facts = bool(page_facts)   # status below reflects Gemini's output, not what survives de-duplication
+        # one fact per (person, type, value) per file: a later page repeating an earlier page's fact is dropped
+        file_seen = seen_facts.setdefault(p["file_id"], set())
+        deduped = []
+        for f in page_facts:
+            key = (f[0], f[1], str(f[2]).strip().lower())
+            if key not in file_seen:
+                file_seen.add(key)
+                deduped.append(f)
+        page_facts = deduped
 
-print(f"\n--- Summary ---")
-print(f"Processed:       {len(records) - len(errors) - len(skipped)}")
-print(f"Facts extracted: {len(all_facts)}")
-print(f"Skipped:         {len(skipped)}")
-print(f"Errors:          {len(errors)}")
-for e in errors:
-    print(f"  ERROR: {e}")
+        links = {}
+        for l in links_by_file.get(p["file_id"], []):
+            links.setdefault(l["person_index"], []).append(l)
+        by_idx = {m["person_index"]: m for m in p["mentions"]}
+        rejected = 0
+        written = 0
+        for pi, t, v, y, c, inf in page_facts:
+            m = by_idx[pi]
+            gid = None
+            ls = links.get(pi, [])
+            if len(ls) == 1 and (ls[0]["page_index"] is None or ls[0]["page_index"] == p["page_index"] or m["page_index"] is None):
+                ok, why = accepted_link(p, m, ls[0])
+                if ok:
+                    gid = ls[0]["person_gedcom_id"]
+                elif t == "name_as_written":     # log the rejection once per mention
+                    rejected += 1
+                    exception_rows.append((p["file_id"], p["file_name"], p["doc_type_detected"], p["year"], None, None, 1,
+                                           f"FACT_EXTRACTION_LINK_REJECTED: {why}", ls[0]["person_gedcom_id"], now()))
+            if gid is not None and (p["file_id"], gid) in legacy_pairs and p["file_id"] not in FORCE_FILE_IDS:
+                continue                          # already has legacy facts; not duplicated
+            # notebook_03 compares birth/death years on fact_year, so it must be set for the *_year types even when
+            # Gemini leaves it null: take it from a 4-digit fact_value.
+            if not isinstance(y, int) and t in YEAR_FACT_TYPES and re.fullmatch(r"\d{4}", str(v).strip()):
+                y = int(str(v).strip())
+            fact_rows.append({"file_id": p["file_id"], "person_gedcom_id": gid, "fact_type": t, "fact_value": v,
+                              "fact_year": y if isinstance(y, int) else None, "confidence": c, "inferred": inf,
+                              "source_doc_type": p["doc_type_detected"], "extracted_at": now(),
+                              "page_index": p["page_index"], "person_index": pi})
+            written += 1
+        status = "DONE" if gemini_returned_facts else "NO_PEOPLE"
+        if rejected and rejected == len({pi for pi, *_ in page_facts if links.get(pi)}) and rejected > 0:
+            status = "REJECTED"
+        status_rows.append((p["file_id"], p["page_index"], status, f"{rejected} link(s) rejected" if rejected else None, calls, written, now()))
+        if p["file_id"] in FORCE_FILE_IDS:
+            forced_cleanup.add(p["file_id"])
+        print(f"  ✓ {len(page_facts)} facts ({written} kept, {rejected} link(s) rejected), {calls} call(s)")
+        maybe_flush(i)
+        if i < len(selected) - 1:
+            time.sleep(REQUEST_DELAY)
+    for p in no_people_pages[:MAX_PAGES]:
+        status_rows.append((p["file_id"], p["page_index"], "NO_PEOPLE", "no mention rows for this page", 0, 0, now()))
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Cell 6 — Write facts to Delta
+# MAGIC ## Cell 6 — Final write and summary
+# MAGIC
+# MAGIC The loop above writes to Delta every `chunk_pages` pages (see `flush()`); this cell writes whatever is left and prints the run totals.
 
 # COMMAND ----------
 
-if all_facts:
-    schema = StructType([
-        StructField("file_id",          StringType(),    False),
-        StructField("person_gedcom_id", StringType(),    True),
-        StructField("fact_type",        StringType(),    True),
-        StructField("fact_value",       StringType(),    True),
-        StructField("fact_year",        IntegerType(),   True),
-        StructField("confidence",       StringType(),    True),
-        StructField("inferred",         BooleanType(),   True),
-        StructField("source_doc_type",  StringType(),    True),
-        StructField("extracted_at",     TimestampType(), True),
-    ])
-    facts_df = spark.createDataFrame(all_facts, schema=schema)
-    facts_df.write.format("delta").mode("append").saveAsTable("genealogy.gold_transcript_facts")
-    print(f"Written {facts_df.count()} fact rows to gold_transcript_facts")
+if DRY_RUN:
+    print("Dry run: nothing written.")
 else:
-    print("No facts to write.")
+    flush()
+    print(f"\nRun totals: {totals['facts']} fact rows, {totals['pages']} page statuses, {totals['rejections']} link rejections logged")
 
 # COMMAND ----------
 
@@ -379,7 +626,10 @@ else:
 
 spark.sql("""
   SELECT
-    sdp.file_name,
+    gtf.file_id,
+    gtf.page_index,
+    gtf.person_index,
+    m.name_raw,
     p.given_name,
     p.surname,
     gtf.fact_type,
@@ -388,8 +638,10 @@ spark.sql("""
     gtf.inferred,
     gtf.source_doc_type
   FROM genealogy.gold_transcript_facts gtf
-  JOIN genealogy.silver_document_person sdp ON gtf.file_id = sdp.file_id
-  JOIN genealogy.gold_person_life p ON gtf.person_gedcom_id = p.person_gedcom_id
-  ORDER BY sdp.file_name, gtf.fact_type
-  LIMIT 100
+  LEFT JOIN genealogy.silver_transcript_person_mention m
+         ON m.file_id = gtf.file_id AND m.person_index = gtf.person_index
+  LEFT JOIN genealogy.gold_person_life p ON gtf.person_gedcom_id = p.person_gedcom_id
+  WHERE gtf.person_index IS NOT NULL
+  ORDER BY gtf.extracted_at DESC, gtf.file_id, gtf.person_index, gtf.fact_type
+  LIMIT 200
 """).display()
