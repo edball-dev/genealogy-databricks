@@ -1,6 +1,6 @@
 # Census age mismatches: review outcome
 
-**Update:** the age gate was then raised from 5 to 10 years (notebook_01 Cells 5e-5h3, notebook_02 `AGE_CHECK_TOLERANCE`, DQ-025). Of the 17 rows below, 9 now pass the gate (the six "same person" rows with a gap of 6-9 plus the three other same-person rows within 10). DQ-025 `LINK_AGE_MISMATCH` is now 8 rows: the six different-person rows with a gap over 10 (Mary Ann Balls, Elizabeth Balls, Mary Ann Eastoe, Herbert Davis, Ann Pearson, Mary Pearson) and the two doubtful ones (Thomas Cope, Susan Ambrose). The Israel/Sarah Clifford link has a gap of exactly 10, so DQ-025 does not flag it; the rebuild drops it because the names no longer match.
+**Update:** the age gate was then raised from 5 to 10 years (notebook_01 Cells 5e-5h3, notebook_02 `AGE_CHECK_TOLERANCE`, DQ-025). Of the 17 rows below, 9 now pass the gate: 8 of the 10 same-person rows, and the Israel/Sarah Clifford link (gap of exactly 10; the rebuild still drops it because the names no longer match). DQ-025 `LINK_AGE_MISMATCH` is now 8 rows: six different-person rows (Mary Ann Balls, Elizabeth Balls, Mary Ann Eastoe, Herbert Davis, Ann Pearson, Mary Pearson) and the two doubtful same-person rows (Thomas Cope, Susan Ambrose).
 
 DQ-025 `LINK_AGE_MISMATCH` listed 41 rows. Two were corrected earlier (Pearson 1881 42→62, Ballantyne 1901 51→57); the other 39 were checked against the images in batches. Result:
 
