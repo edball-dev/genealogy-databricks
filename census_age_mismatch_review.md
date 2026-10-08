@@ -1,6 +1,6 @@
 # Census age mismatches: review outcome
 
-DQ-025 `LINK_AGE_MISMATCH` listed 41 rows. Two (Cuthbertson-era OCR fixes aside) were corrected earlier (Pearson 1881 42→62, Ballantyne 1901 51→57); the other 39 were checked against the images in batches. Result:
+DQ-025 `LINK_AGE_MISMATCH` listed 41 rows. Two were corrected earlier (Pearson 1881 42→62, Ballantyne 1901 51→57); the other 39 were checked against the images in batches. Result:
 
 - **22 mention rows corrected** (transcript line and `silver_transcript_person_mention` age, marked `COMPLETE` with a correction note): the age had been misread, and the corrected age agrees with the tree.
 - **1 name corrected:** Clifford 1841, "Sarah do" is "Israel Clifford (male)", age 12 (mention renamed, role Son).
