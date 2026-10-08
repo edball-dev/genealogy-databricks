@@ -49,7 +49,7 @@ dq025_before AS (
   WHERE sdp.match_confidence IN ('HIGH', 'MEDIUM')
     AND c.doc_year IS NOT NULL AND m.age_years IS NOT NULL
     AND TRY_CAST(pl.birth_year AS INT) IS NOT NULL
-    AND ABS(c.doc_year - m.age_years - TRY_CAST(pl.birth_year AS INT)) > 5
+    AND ABS(c.doc_year - m.age_years - TRY_CAST(pl.birth_year AS INT)) > 10
   UNION
   SELECT sdp.file_id, sdp.person_gedcom_id
   FROM genealogy.silver_document_person_pre_rebuild sdp

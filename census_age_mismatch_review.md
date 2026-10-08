@@ -1,5 +1,7 @@
 # Census age mismatches: review outcome
 
+**Update:** the age gate was then raised from 5 to 10 years (notebook_01 Cells 5e-5h3, notebook_02 `AGE_CHECK_TOLERANCE`, DQ-025). Of the 17 rows below, 9 now pass the gate (the six "same person" rows with a gap of 6-9 plus the three other same-person rows within 10). DQ-025 `LINK_AGE_MISMATCH` is now 8 rows: the six different-person rows with a gap over 10 (Mary Ann Balls, Elizabeth Balls, Mary Ann Eastoe, Herbert Davis, Ann Pearson, Mary Pearson) and the two doubtful ones (Thomas Cope, Susan Ambrose). The Israel/Sarah Clifford link has a gap of exactly 10, so DQ-025 does not flag it; the rebuild drops it because the names no longer match.
+
 DQ-025 `LINK_AGE_MISMATCH` listed 41 rows. Two were corrected earlier (Pearson 1881 42→62, Ballantyne 1901 51→57); the other 39 were checked against the images in batches. Result:
 
 - **22 mention rows corrected** (transcript line and `silver_transcript_person_mention` age, marked `COMPLETE` with a correction note): the age had been misread, and the corrected age agrees with the tree.
@@ -20,7 +22,7 @@ DQ-025 `LINK_AGE_MISMATCH` listed 41 rows. Two were corrected earlier (Pearson 1
 | PEARSON_John_1841_Census | Mary Pearson (20) | Mary Pearson (1806) |
 | CLIFFORD_Edward_1841_Census | Israel Clifford (12) | Sarah Clifford (1819) |
 
-### Same person, age on the page differs from the tree (10): the 5-year gate would wrongly drop these
+### Same person, age on the page differs from the tree (10): inside the new 10-year gate except the last two
 
 | Page | Page age → implied birth | Tree birth | Gap | Other censuses agree with the tree? |
 |---|---|---|---|---|

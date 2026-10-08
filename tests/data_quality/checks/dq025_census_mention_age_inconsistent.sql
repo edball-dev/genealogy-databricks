@@ -9,7 +9,7 @@
 --   check a census match against the mention row the matched person is linked
 --   to (silver_document_person.person_index -> silver_transcript_person_mention),
 --   using the age on the page: a mention whose age implies a birth year more
---   than 5 years from the tree's is not accepted. Two things can make that
+--   than 10 years from the tree's is not accepted. Two things can make that
 --   check fire, and both need a person to look at the image:
 --     * the OCR misread the name or age (found 2026-10-07: George Cuthbertson
 --       Sr's 1841 head read as "Thos, 64" instead of "Geo, 69"; John
@@ -23,8 +23,8 @@
 --
 --   Two reasons, one row each:
 --     LINK_AGE_MISMATCH   - the person is linked to a census mention whose age
---                           implies a birth year >5 years from the tree's
---                           (the same rule notebook_02 and Cell 5h2 apply).
+--                           implies a birth year more than 10 years from the tree's
+--                           (the same rule notebook_02 and Cells 5e-5h3 apply).
 --     NO_MATCHING_MENTION - a HIGH/MEDIUM census match with no person_index
 --                           although the file has mentions: Cell 5h2 found no
 --                           mention with this name and a consistent age.
@@ -58,7 +58,7 @@ WHERE sdp.match_confidence IN ('HIGH', 'MEDIUM')
   AND c.doc_year IS NOT NULL
   AND m.age_years IS NOT NULL
   AND TRY_CAST(pl.birth_year AS INT) IS NOT NULL
-  AND ABS(c.doc_year - m.age_years - TRY_CAST(pl.birth_year AS INT)) > 5
+  AND ABS(c.doc_year - m.age_years - TRY_CAST(pl.birth_year AS INT)) > 10
 
 UNION ALL
 

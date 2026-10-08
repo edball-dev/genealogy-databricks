@@ -43,7 +43,7 @@
 # MAGIC         mention row, not Gemini. Prompt captures birthplace, years married, children, address, narrative detail.
 # MAGIC         Cost control: dry_run widget (default true) reports page/call counts without calling Gemini; max_pages limit;
 # MAGIC         per-page status persisted in silver_fact_extraction_status (errors retried only with retry_errors=true);
-# MAGIC         census links whose mention age disagrees with the tree birth year by >5 years are logged to
+# MAGIC         census links whose mention age disagrees with the tree birth year by more than AGE_CHECK_TOLERANCE years are logged to
 # MAGIC         silver_document_match_exception and not stored against that tree person.
 # MAGIC         Needs notebook_02_schema_and_cleanup.sql applied first.
 # MAGIC - v2.1: Align Gemini config with ocr_pipeline: model gemini-3.1-pro-preview (gemini-3-pro-preview returns 404 on this
@@ -53,6 +53,8 @@
 # MAGIC - v2.3: Forced re-extraction replaces ALL of a file's facts (not just legacy), only when every page succeeded. Linking of
 # MAGIC         filename/primary matches to a mention (name variants, census age tie-break) lives in notebook_01 Cell 5h2, not here:
 # MAGIC         a person with no person_index is simply left unlinked.
+# MAGIC - v2.8: AGE_CHECK_TOLERANCE raised from 5 to 10 years, matching notebook_01 Cells 5e-5h3. A review of 41 census links found ages
+# MAGIC         that differ from the tree by 6-9 years for people confirmed on other censuses (stated ages drift); 5 years rejected those.
 # MAGIC - v2.7: Facts, page statuses and exceptions are written to Delta every chunk_pages (default 25) pages at a file boundary, not once
 # MAGIC         at the end, so a stuck or killed run loses at most one chunk. Status rows are de-duplicated per (file, page).
 # MAGIC - v2.6: Retry on the google-genai SDK's own errors (APIError .code 429/500/503/504). The old decorator listed google.api_core
@@ -109,7 +111,7 @@ MAX_RETRIES    = 5
 MAX_CHUNK_CHARS = 30000     # a page longer than this is split on line boundaries into several calls
 AGE_CHECK_DOC_TYPES = {"Census"}   # doc types where mention age is a true age at document date
 YEAR_FACT_TYPES = {"birth_year", "death_year", "marriage_year"}   # fact_year is derived from fact_value for these
-AGE_CHECK_TOLERANCE = 5            # years between (doc year - mention age) and tree birth year before a link is rejected
+AGE_CHECK_TOLERANCE = 10           # years between (doc year - mention age) and tree birth year before a link is rejected (same gate as notebook_01 Cells 5e-5h3)
 
 dbutils.widgets.dropdown("dry_run", "true", ["true", "false"], "Dry run (no Gemini calls, no writes)")
 dbutils.widgets.text("max_pages", "25", "Max pages to process this run")
