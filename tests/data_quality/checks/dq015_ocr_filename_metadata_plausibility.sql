@@ -2,7 +2,7 @@
 -- title: ocr_transcriptions surname/forename/year parsed from filename look implausible
 -- severity: warning
 -- guards_bug:
--- known_failing: true
+-- known_failing: false
 -- existing_asana_task: 1218567855930502
 -- description: >
 --   surname/forename/year/doc_type are parsed from the filename by
@@ -28,6 +28,11 @@
 --   (9 Conveyance pages + 1 Charles Balls row) are renamed in Drive and
 --   reprocessed, or the parse_filename regex is extended to accept month
 --   abbreviations.
+--
+--   Cleared (2026-10-11): the Tier 2 run (7826b07f) returned 0 rows -- the
+--   Conveyance and Charles Balls filenames have been fixed/reprocessed -- so
+--   known_failing flipped to false. A future violation is a genuine
+--   regression. Asana task 1218567855930502 closed.
 
 SELECT file_id, file_name, surname, forename, year, doc_type, page_index
 FROM genealogy.ocr_transcriptions
