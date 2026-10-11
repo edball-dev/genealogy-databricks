@@ -11,7 +11,7 @@
 -- MAGIC It is a view, so it recomputes live — no refresh step.
 -- MAGIC
 -- MAGIC `uncovered_count` is the person's total uncovered citations (`SIGNAL_UNCOVERED_SOURCES` fires at 2+).
--- MAGIC `ancestry_person_url` deep-links into Ancestry tree 8316967.
+-- MAGIC `ancestry_person_url` deep-links into Ancestry tree 8316967; a GEDCOM id of `@I_123@` maps to Ancestry id `-123` (leading `_` = `-`).
 
 -- COMMAND ----------
 
@@ -26,7 +26,7 @@ SELECT
   COUNT(*) OVER (PARTITION BY sc.person_gedcom_id)                      AS uncovered_count,
   sc.citation_url,
   concat('https://www.ancestry.co.uk/family-tree/person/tree/8316967/person/',
-         regexp_extract(sc.person_gedcom_id, '(\\d+)', 1), '/facts')    AS ancestry_person_url,
+         regexp_replace(regexp_extract(sc.person_gedcom_id, '^@I(_?\\d+)@$', 1), '^_', '-'), '/facts')    AS ancestry_person_url,
   current_timestamp()                                                   AS refreshed_at
 FROM genealogy.gold_source_coverage sc
 JOIN genealogy.gold_research_person_signals s ON s.person_gedcom_id = sc.person_gedcom_id
