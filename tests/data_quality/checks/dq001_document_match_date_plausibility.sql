@@ -89,6 +89,24 @@
 --   live: Thomas Thorpe's row cleared, the 5 Corner/Cope Will rows are
 --   unaffected, DQ-001 at 0 violations. known_failing flipped to false — a
 --   future violation here is a genuine regression, not a known/accepted gap.
+--
+--   Joint-headstone exemption (2026-10-11): the upper bound also no longer
+--   applies to doc_type_detected = 'MonumentalInscription'. After the DQ-005
+--   cleanup, Alfred's headstone (file 0B00VuRbH2UFNTS1iaXhVcVV0YTA, year
+--   1996-01-27 = Alfred's death date) was correctly linked via
+--   override_person_gedcom_id to Gladys Pearson (@I_967018290@, b.1905,
+--   d.1986), so match_method = MENTION_OVERRIDE and 1996 is >2yr past her
+--   death. Not a data error: a joint headstone carries the later spouse's
+--   death date, so any couple where one spouse died first trips the upper
+--   bound once the stone is linked to both. The lower (birth-side) bound
+--   still applies to all types. The matcher (notebook_01_document_matching
+--   Cells 5/22) is deliberately NOT changed: cell 5d2 pins override mentions
+--   with no year gate, and exempting MonumentalInscription there would widen
+--   candidate sets for every headstone (cf. the Probate/Will experiment
+--   above). This is a deliberate exception to the "check mirrors matcher"
+--   principle: the check is looser than the matcher for monuments, which is
+--   safe because the matcher still gates them. Tasks 1219403505107099,
+--   1219404643130936 (out of scope), 1218800360403230.
 
 SELECT DISTINCT dp.file_id, dp.person_gedcom_id, dp.display_name, dp.match_method,
        dp.match_confidence, t.doc_type_detected, t.year AS doc_year, pl.birth_year, pl.death_year
@@ -100,6 +118,6 @@ WHERE t.year RLIKE '^[0-9]{4}'
     CAST(SUBSTRING(t.year, 1, 4) AS INT) < pl.birth_year - 2
     OR (
       CAST(SUBSTRING(t.year, 1, 4) AS INT) > COALESCE(pl.death_year, pl.birth_year + 110) + 2
-      AND t.doc_type_detected != 'NewspaperClipping'
+      AND t.doc_type_detected NOT IN ('NewspaperClipping', 'MonumentalInscription')
     )
   );
