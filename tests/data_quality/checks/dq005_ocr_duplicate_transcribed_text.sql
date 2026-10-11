@@ -2,7 +2,7 @@
 -- title: ocr_transcriptions duplicate transcribed_text across file_ids
 -- severity: critical
 -- guards_bug: 1218420653319268
--- known_failing: true
+-- known_failing: false
 -- existing_asana_task: 1218420653319268
 -- description: >
 --   Two different file_ids sharing identical transcribed_text is a likely
