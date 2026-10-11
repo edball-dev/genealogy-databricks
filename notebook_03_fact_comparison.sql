@@ -14,14 +14,17 @@
 -- MAGIC         occupation matches; tree_value shows all occupations pipe-separated.
 -- MAGIC         Cell 4: add military rank exclusion filter (Pte, Cpl, Sgt etc.).
 -- MAGIC         Cell 4: add conflict_severity = LOW for occupation conflicts (was NULL).
--- MAGIC - v1.2: Cell 9 creates view gold_fact_comparison_reviewed, applying Ed's review marks from
+-- MAGIC - v1.2: view gold_fact_comparison_reviewed (now in views_document_and_fact_review), applying Ed's review marks from
 -- MAGIC         silver_fact_conflict_review (see notebook_fact_conflict_review_init.sql — prerequisite).
 -- MAGIC         Consumers counting/listing conflicts should use its is_open_conflict flag.
 -- MAGIC - v1.3: TREE_GAP review outcome (task 1219234333541171). Reason code TREE_GAP = legitimate
 -- MAGIC         occupation the tree should record. Never an open conflict; applies even if the tree's
 -- MAGIC         occupation list later changes; `is_tree_gap` is TRUE only while the tree still lacks the
--- MAGIC         value (self-clears when the comparison becomes MATCH). Cell 11 adds the worklist view
--- MAGIC         `gold_housekeeping_tree_gap_occupations`.
+-- MAGIC         value (self-clears when the comparison becomes MATCH). The worklist view
+-- MAGIC         `gold_housekeeping_tree_gap_occupations` is likewise in views_document_and_fact_review.
+-- MAGIC - v1.4 (2026-10-11): view DDL moved out to views_document_and_fact_review. This notebook only
+-- MAGIC         refreshes the gold_fact_comparison table (a view recreate here would transfer view ownership
+-- MAGIC         to whoever runs it). Prerequisite: the views exist (run that notebook only on definition changes).
 
 -- COMMAND ----------
 
@@ -371,65 +374,6 @@ ORDER BY fc.fact_type;
 -- COMMAND ----------
 
 -- MAGIC %md
--- MAGIC ## Cell 9 — gold_fact_comparison_reviewed (applies review marks)
--- MAGIC
--- MAGIC Prerequisite: `silver_fact_conflict_review` exists (notebook_fact_conflict_review_init).
--- MAGIC
--- MAGIC Key: file_id + person_gedcom_id + fact_type + transcript_value (null-safe). The latest review
--- MAGIC per key wins. `review_applies` is TRUE only while the tree value is unchanged since the
--- MAGIC review (`reviewed_tree_value`); a changed tree value reopens the conflict, and a changed
--- MAGIC transcript value or new file_id is simply a new key (open). Reviewed rows stay visible here.
--- MAGIC `is_open_conflict` is the single definition of "conflict still needing attention".
--- MAGIC
--- MAGIC `TREE_GAP` reviews (legitimate occupation missing from the tree) are the exception to the
--- MAGIC tree-value snapshot rule: adding one occupation changes `tree_value`, which must not reopen the
--- MAGIC person's other TREE_GAP rows as conflicts. They stay applied until the comparison is a MATCH.
-
--- COMMAND ----------
-
--- %sql
-CREATE OR REPLACE VIEW genealogy.gold_fact_comparison_reviewed AS
-WITH latest_review AS (
-  SELECT * EXCEPT (rn)
-  FROM (
-    SELECT r.*,
-           ROW_NUMBER() OVER (
-             PARTITION BY file_id, person_gedcom_id, fact_type, transcript_value
-             ORDER BY reviewed_at DESC NULLS LAST
-           ) AS rn
-    FROM genealogy.silver_fact_conflict_review r
-  )
-  WHERE rn = 1
-)
-SELECT
-  fc.*,
-  rv.review_status,
-  rv.reason_code        AS review_reason_code,
-  rv.notes              AS review_notes,
-  rv.reviewed_at,
-  rv.reviewed_tree_value,
-  COALESCE(rv.review_status IS NOT NULL
-           AND (rv.reason_code = 'TREE_GAP' OR rv.reviewed_tree_value <=> fc.tree_value), FALSE)
-                                                                              AS review_applies,
-  (fc.status = 'CONFLICT'
-   AND NOT COALESCE(rv.review_status IS NOT NULL
-                    AND (rv.reason_code = 'TREE_GAP' OR rv.reviewed_tree_value <=> fc.tree_value), FALSE))
-                                                                              AS is_open_conflict,
-  -- Legitimate occupation the tree lacks: reviewed TREE_GAP and the comparison still isn't a MATCH.
-  -- Clears on its own once the tree gains the occupation (status flips to MATCH on the next rebuild).
-  COALESCE(rv.reason_code = 'TREE_GAP'
-           AND fc.fact_type = 'occupation'
-           AND fc.status IN ('CONFLICT', 'TRANSCRIPT_ONLY'), FALSE)           AS is_tree_gap
-FROM genealogy.gold_fact_comparison fc
-LEFT JOIN latest_review rv
-  ON  rv.file_id          = fc.file_id
-  AND rv.person_gedcom_id = fc.person_gedcom_id
-  AND rv.fact_type        = fc.fact_type
-  AND rv.transcript_value <=> fc.transcript_value;
-
--- COMMAND ----------
-
--- MAGIC %md
 -- MAGIC ## Cell 10 — Open vs reviewed conflict counts
 
 -- COMMAND ----------
@@ -444,31 +388,3 @@ GROUP BY fact_type, conflict_severity
 ORDER BY fact_type, conflict_severity;
 
 
--- COMMAND ----------
-
--- MAGIC %md
--- MAGIC ## Cell 11 — gold_housekeeping_tree_gap_occupations (Housekeeping worklist)
--- MAGIC
--- MAGIC One row per document occupation Ed has marked `TREE_GAP` that the tree still lacks, so he can add
--- MAGIC a dated occupation in Ancestry. Rows vanish by themselves once the tree matches (no review step).
--- MAGIC `NOT_AN_OCCUPATION` rows (students, club roles) are deliberately absent. Feeds
--- MAGIC `SIGNAL_TRANSCRIPT_ONLY_FACTS` via `is_tree_gap`.
-
--- COMMAND ----------
-
--- %sql
-CREATE OR REPLACE VIEW genealogy.gold_housekeeping_tree_gap_occupations AS
-SELECT
-  fc.person_gedcom_id,
-  fc.display_name,
-  fc.file_id,
-  fc.file_name,
-  ot.year               AS document_year,
-  fc.source_doc_type,
-  fc.transcript_value   AS occupation_as_written,
-  fc.tree_value         AS tree_occupations,
-  fc.review_notes,
-  fc.reviewed_at
-FROM genealogy.gold_fact_comparison_reviewed fc
-LEFT JOIN genealogy.ocr_transcriptions ot ON ot.file_id = fc.file_id
-WHERE fc.is_tree_gap;

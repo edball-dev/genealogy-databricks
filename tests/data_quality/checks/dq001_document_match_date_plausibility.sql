@@ -35,8 +35,8 @@
 --   a parser bug but to genealogy.gold_event (a Databricks-only view at the
 --   time) always taking silver_event_date.date_start, which is the year-1
 --   sentinel for a "BEF <year>" range instead of the real year held in
---   date_end. Fixed and source-controlled in 07_materialise_gold_tables.ipynb
---   Cells 1-4, applied to production and confirmed live 2026-09-15: those 6
+--   date_end. Fixed and source-controlled in views_core_gold.ipynb (originally
+--   07_materialise_gold_tables.ipynb Cells 1-4), applied to production and confirmed live 2026-09-15: those 6
 --   rows cleared, DQ-001 dropped from 9 to 3 violations. Full root-cause
 --   trace and resolution at Asana task 1218448497347847 (now closed).
 --

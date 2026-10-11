@@ -28,8 +28,8 @@
 --   *birth* date, confirming the bug wasn't death-date-specific -- it was
 --   in the shared view logic, hit from either side.
 --
---   Fixed and source-controlled in 07_materialise_gold_tables.ipynb
---   Cells 1-4. BEF fix applied 2026-09-15 (15 -> 1 violations). The last
+--   Fixed and source-controlled in views_core_gold.ipynb (originally
+--   07_materialise_gold_tables.ipynb Cells 1-4). BEF fix applied 2026-09-15 (15 -> 1 violations). The last
 --   row, James Pratt (@I332511987559@), was NOT a rounding artifact: it was
 --   the visible tip of a systematic bug where gold_event took date_start for
 --   ABT dates, but silver_event_date stores "abt YYYY" as a +/-1 year range
