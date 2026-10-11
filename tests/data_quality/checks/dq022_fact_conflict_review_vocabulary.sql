@@ -17,7 +17,7 @@ WHERE review_status NOT IN ('FALSE_POSITIVE', 'RESOLVED', 'ACCEPTED')
    OR reviewed_at IS NULL
    OR (reason_code IS NOT NULL AND reason_code NOT IN (
         'PLACE_GRANULARITY', 'PLACE_SPELLING', 'LIFE_STAGE_OCCUPATION', 'TRANSCRIPTION_ERROR', 'WRONG_PERSON_MATCH',
-        'TREE_CORRECTED', 'CENSUS_AGE_DRIFT', 'TREE_GAP', 'NOT_AN_OCCUPATION', 'OTHER'))
+        'TREE_CORRECTED', 'MINOR_AGE_DRIFT', 'TREE_GAP', 'NOT_AN_OCCUPATION', 'OTHER'))
    OR (reason_code IN ('TREE_GAP', 'NOT_AN_OCCUPATION') AND fact_type <> 'occupation')
    OR (reviewed_tree_value IS NULL AND fact_type <> 'occupation' AND review_status IS NOT NULL
        AND EXISTS (SELECT 1 FROM genealogy.gold_fact_comparison fc
