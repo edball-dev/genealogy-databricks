@@ -2,8 +2,8 @@
 -- title: Age-bearing document types not getting age-based corroboration
 -- severity: warning
 -- guards_bug: 1218506594311016
--- known_failing:
--- existing_asana_task:
+-- known_failing: true
+-- existing_asana_task: 1218524118436461
 -- description: >
 --   notebook_01_document_matching.ipynb Cell 5 extracts a document-stated
 --   age (doc_stated_age) via doc-type-specific regex for Census,
