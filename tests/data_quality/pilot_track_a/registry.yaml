@@ -52,19 +52,10 @@ tables:
 
   - table: genealogy.gold_source_coverage
     not_null_columns:
-      - column: event_id
-        known_failing: true
-        existing_asana_task: "1218420283884341"
-        description: >
-          All event_id values are currently NULL (open bug, DQ-004). This
-          check exists to prove the registry's known-failing path, not to
-          find a new issue.
       - column: person_gedcom_id
         known_failing: false
-    # No duplicate_key: spec §1 notes there's no confirmed single-column
-    # natural key on this table (event_id is a candidate but is 100% NULL
-    # right now, tracked separately) — deliberately not forcing a duplicate
-    # check onto a column that can't yet serve as one.
+    # No duplicate_key: no confirmed single-column natural key (table is at
+    # citation grain: person, source_title, citation_date, ancestry_record_id).
 
   - table: genealogy.gold_ancestral_proximity
     not_null_columns:

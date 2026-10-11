@@ -2,7 +2,7 @@
 -- title: gold_person_life year sanity
 -- severity: critical
 -- guards_bug:
--- known_failing: true
+-- known_failing: false
 -- existing_asana_task: 1218492852523020
 -- description: >
 --   birth_year/death_year should be plausible calendar years (not a parser
@@ -28,15 +28,14 @@
 --   *birth* date, confirming the bug wasn't death-date-specific -- it was
 --   in the shared view logic, hit from either side.
 --
---   Fixed and source-controlled in 07_materialise_gold_tables.ipynb
---   Cells 1-4, applied to production and confirmed live 2026-09-15:
---   violations dropped from 15 to 1. The remaining row, James Pratt
---   (@I332511987559@), has death_year (1825) one year before birth_year
---   (1826) from "abt 1826" vs "11 Dec 1826" -- a plausible approximate-date
---   rounding artifact, not the BEF bug; not code-fixable without checking
---   the actual source record, tracked separately at existing_asana_task
---   above. known_failing stays true because this is now the sole remaining
---   cause, tracked elsewhere rather than a fresh regression.
+--   Fixed and source-controlled in views_core_gold.ipynb (originally
+--   07_materialise_gold_tables.ipynb Cells 1-4). BEF fix applied 2026-09-15 (15 -> 1 violations). The last
+--   row, James Pratt (@I332511987559@), was NOT a rounding artifact: it was
+--   the visible tip of a systematic bug where gold_event took date_start for
+--   ABT dates, but silver_event_date stores "abt YYYY" as a +/-1 year range
+--   (05a_parse_dates), so every ABT year was one year early (~2,000 events;
+--   death "abt 1826" -> 1825 < birth 1826). Fixed 2026-10-11 by resolving
+--   ABT to the range midpoint (Asana 1218492852523020).
 
 SELECT person_gedcom_id, display_name, birth_year, death_year, birth_date_raw, death_date_raw
 FROM genealogy.gold_person_life
