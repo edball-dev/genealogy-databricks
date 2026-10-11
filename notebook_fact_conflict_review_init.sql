@@ -13,8 +13,8 @@
 -- MAGIC GPS-assessed and resolved — link the assessment in `notes` where one exists; NOT a general
 -- MAGIC "nothing to do" dismissal, use FALSE_POSITIVE for that).
 -- MAGIC
--- MAGIC **Reason codes (suggested):** PLACE_GRANULARITY, LIFE_STAGE_OCCUPATION, TRANSCRIPTION_ERROR,
--- MAGIC WRONG_PERSON_MATCH, TREE_CORRECTED, CENSUS_AGE_DRIFT, OTHER, plus two occupation outcomes:
+-- MAGIC **Reason codes (suggested):** PLACE_GRANULARITY, TRANSCRIPTION_ERROR,
+-- MAGIC WRONG_PERSON_MATCH, TREE_CORRECTED, MINOR_AGE_DRIFT, OTHER, plus two occupation outcomes:
 -- MAGIC `TREE_GAP` (legitimate occupation the tree should record — appears in
 -- MAGIC `gold_housekeeping_tree_gap_occupations` and fires SIGNAL_TRANSCRIPT_ONLY_FACTS until the tree
 -- MAGIC matches; never an open conflict) and `NOT_AN_OCCUPATION` (student/pupil status, club or
