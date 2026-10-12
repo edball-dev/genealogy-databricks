@@ -2,7 +2,7 @@
 -- title: Drive files that never produced a successful OCR transcription
 -- severity: warning
 -- guards_bug:
--- known_failing: true
+-- known_failing: false
 -- existing_asana_task: 1218567602351792
 -- description: >
 --   ocr_pipeline.ipynb's own idempotency check (Cell 14) only excludes a
@@ -30,14 +30,26 @@
 --   DQ-012 (which catches the opposite direction -- a transcription whose
 --   source is now gone from Drive) and from the bronze-registry note that
 --   deliberately excludes ocr_processing_log from Tier 1 row-count checks.
+--   Parked files are excluded: Ed moves problem files out of Documents into
+--   the Drive folder 'Documents _Skipped' (not synced by Fivetran) while he
+--   fixes them (crop, convert, replace). Fivetran flags such a file
+--   _fivetran_deleted = TRUE in staging_google_drive.documents (same
+--   file_id), and flips it back to FALSE if the file is moved back. A file
+--   flagged deleted is therefore not counted; if moved back and failing
+--   again it reappears automatically. A file with no staging row at all
+--   (never synced) is still counted, to avoid hiding genuine failures.
 
-SELECT file_id,
-       MAX_BY(file_name, processed_at) AS file_name,
+SELECT g.file_id,
+       MAX_BY(g.file_name, g.processed_at) AS file_name,
        COUNT(*) AS attempt_count,
-       MAX_BY(status, processed_at) AS latest_status,
-       SUBSTRING(MAX_BY(error_message, processed_at), 1, 300) AS latest_error_summary,
-       MIN(processed_at) AS first_attempted_at,
-       MAX(processed_at) AS last_attempted_at
-FROM genealogy.ocr_processing_log
-GROUP BY file_id
-HAVING SUM(CASE WHEN status IN ('success', 'skipped') THEN 1 ELSE 0 END) = 0;
+       MAX_BY(g.status, g.processed_at) AS latest_status,
+       SUBSTRING(MAX_BY(g.error_message, g.processed_at), 1, 300) AS latest_error_summary,
+       MIN(g.processed_at) AS first_attempted_at,
+       MAX(g.processed_at) AS last_attempted_at
+FROM genealogy.ocr_processing_log g
+WHERE NOT EXISTS (
+  SELECT 1 FROM staging_google_drive.documents d
+  WHERE d.file_id = g.file_id AND d._fivetran_deleted = TRUE
+)
+GROUP BY g.file_id
+HAVING SUM(CASE WHEN g.status IN ('success', 'skipped') THEN 1 ELSE 0 END) = 0;
