@@ -2,7 +2,7 @@
 -- title: silver/gold rows referencing a file_id no longer in ocr_transcriptions
 -- severity: warning
 -- guards_bug:
--- known_failing: true
+-- known_failing: false
 -- existing_asana_task:
 -- description: >
 --   silver_document_person.file_id, gold_transcript_facts.file_id,
@@ -22,19 +22,7 @@
 --
 --   Reported at warning, matching the Tier 1 fk_integrity default (an
 --   orphaned FK is usually recoverable/traceable, not an immediate hard
---   break). known_failing: true -- live validation (2026-09-17) found 7
---   rows in gold_transcript_facts, all one file_id
---   (1FStSOipFFHbRQrTDgkN2W0a7wABcUGZy,
---   Documents/Family_CUTHBERTSON/BALLANTYNE_Rachel_1809_Birth.jpg per
---   staging_google_drive.documents, extracted_at 2026-02-24) with zero trace
---   in ocr_processing_log, ocr_transcriptions, silver_document_person, or
---   gold_fact_comparison -- i.e. facts were extracted for a file that has no
---   record of ever being OCR'd or logged, root cause not yet understood.
---   silver_document_person, gold_fact_comparison, and
---   silver_document_match_exception were all clean (0 rows) at the same
---   check. Needs its own investigation (bucket B/D territory per the
---   failing-check-triage skill, not diagnosed further here) before this
---   flips to known_failing: false.
+--   break).
 
 SELECT 'silver_document_person' AS source_table, t.file_id,
        t.person_gedcom_id AS context
