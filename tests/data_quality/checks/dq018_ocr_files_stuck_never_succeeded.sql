@@ -2,7 +2,7 @@
 -- title: Drive files that never produced a successful OCR transcription
 -- severity: warning
 -- guards_bug:
--- known_failing: true
+-- known_failing: false
 -- existing_asana_task: 1218567602351792
 -- description: >
 --   ocr_pipeline.ipynb's own idempotency check (Cell 14) only excludes a
