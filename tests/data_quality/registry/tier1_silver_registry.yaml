@@ -41,15 +41,13 @@
 #      @I332693890365@, both married to the same wife). Filed as Asana task
 #      1218472474949479 (Data section); shipped as known_failing against it.
 #   2. silver_event_source.source_xref / silver_person_source.source_xref:
-#      169 and 180 NULL respectively (out of 52715 / 18636), plus 1 row
-#      with person_gedcom_id also NULL in silver_person_source. All sampled
-#      rows have citation_page/text/date also NULL — looks like near-empty
-#      citation stubs, but root cause (a GEDCOM inline-citation style vs. a
-#      genuine extraction gap in 03b_generate_sources.ipynb) wasn't fully
-#      confirmed within this pass. Shipped as known_failing with the live
-#      counts recorded in `notes` rather than guessing a root cause or
-#      silently excluding the check — flagged as needing further triage,
-#      not closed out.
+#      137 and 167 NULL respectively. Root cause CONFIRMED 2026-10-12: these
+#      match raw bronze 1:1 (source-less SOUR citations in the Ancestry
+#      tree), so it is data to clean up, not a pipeline bug. Kept as
+#      warning + known_failing against the cleanup task 1219402948881812.
+#      (A third finding, 1 silver_person_source row with NULL
+#      person_gedcom_id from the GEDCOM header line, was a genuine pipeline
+#      bug and is fixed in 03b_generate_sources.ipynb.)
 #
 # check.check_type: not_null | uniqueness | fk_integrity
 #   not_null:      column
@@ -105,25 +103,25 @@ objects:
       - check_type: not_null
         column: person_gedcom_id
         severity: critical
-        known_failing: true
-        existing_asana_task: "1218472474949479"
         notes: >
-          1 row with person_gedcom_id NULL (source_xref = literal
-          "Ancestry.com Family Trees", not a real @S xref) — a root-level
-          generic citation not attributable to a specific person. Grouped
-          with the source_xref finding below under the same task pending
-          fuller root-cause triage.
+          Previously failed with 1 row (source_xref = "Ancestry.com
+          Family Trees"): the GEDCOM header line 2 (1 SOUR, no record)
+          was picked up as a person citation. Fixed in
+          03b_generate_sources.ipynb by requiring an @I record_xref; this
+          check should now pass (0) and guards against a regression.
       - check_type: not_null
         column: source_xref
-        severity: critical
+        severity: warning
         known_failing: true
-        existing_asana_task: "1218472474949479"
+        existing_asana_task: "1219402948881812"
         notes: >
-          180 of 18636 rows have source_xref NULL (citation_page/text/date
-          also NULL on every sampled row — near-empty citation stubs).
-          Root cause not fully confirmed: could be a valid GEDCOM
-          inline-citation style, or a gap in 03b_generate_sources.ipynb's
-          extraction. Flagged for further triage, not closed out.
+          Root cause CONFIRMED 2026-10-12 — 167 person rows have a
+          source-less citation and these match raw bronze 1:1 (167 level-1
+          SOUR with NULL value on @I records), so it is Ancestry tree data
+          to clean up, not a pipeline bug. Kept as warning so a future
+          pipeline regression (silver count > bronze count) still
+          surfaces. Cleanup tracked in 1219402948881812; worklist view:
+          genealogy.gold_housekeeping_citations_without_source.
       - check_type: uniqueness
         columns: [person_gedcom_id, source_xref, citation_root_line_no]
         severity: critical
@@ -426,14 +424,17 @@ objects:
         severity: critical
       - check_type: not_null
         column: source_xref
-        severity: critical
+        severity: warning
         known_failing: true
-        existing_asana_task: "1218472474949479"
+        existing_asana_task: "1219402948881812"
         notes: >
-          169 of 52715 rows have source_xref NULL (citation_page/text also
-          NULL on every sampled row) — same near-empty-citation-stub
-          pattern as silver_person_source.source_xref, same
-          not-fully-confirmed root cause. See that table's note.
+          Root cause CONFIRMED 2026-10-12 — 137 event rows have a
+          source-less citation and these match raw bronze 1:1 (137 level>=2
+          SOUR with NULL value), so it is Ancestry tree data to clean up,
+          not a pipeline bug. Kept as warning so a future pipeline
+          regression (silver count > bronze count) still surfaces. Cleanup
+          tracked in 1219402948881812; worklist view:
+          genealogy.gold_housekeeping_citations_without_source.
       - check_type: uniqueness
         columns: [event_id, source_xref, citation_root_line_no]
         severity: critical

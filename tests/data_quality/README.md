@@ -243,11 +243,12 @@ relationship_type)` rows in `silver_relationship` plus 10 duplicate rows in
 `silver_event_participant`, both traced to duplicate family/person records
 in the source GEDCOM — filed as Asana task `1218472474949479`
 (`known_failing: true` on those two checks references it).
-`silver_person_source`/`silver_event_source` have ~180/169 rows with a null
-`source_xref` (root cause unconfirmed — could be a valid GEDCOM
-inline-citation style or an extraction gap) — not filed as its own task per
-the triage skill's bucket-B confidence bar, but referenced against the same
-task with a "needs further triage" note rather than silently passed over.
+`silver_person_source`/`silver_event_source` have 167/137 rows with a null
+`source_xref`; root cause confirmed 2026-10-12 as source-less citations in
+the Ancestry tree (matching raw bronze 1:1), so these checks are warnings,
+`known_failing` against the cleanup task `1219402948881812`. A separate
+header-line row (null `person_gedcom_id`) was a pipeline bug, fixed in
+`03b_generate_sources.ipynb`.
 All ~24 `fk_integrity` checks otherwise came back with **zero** orphaned
 rows — a clean result, not a gap.
 
