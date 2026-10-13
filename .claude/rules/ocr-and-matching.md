@@ -54,6 +54,13 @@ Applies when working on `ocr_pipeline`, `notebook_01_document_matching`, `notebo
   Key is `(file_id, page_index, person_index)`, joined null-safe (`<=>`). NULL means no known
   mention. Cell 5e writes it directly; Cell 5h2 links other rows by first forename and last name
   token only when the person matches exactly one unclaimed mention in the file.
+- A mention-level `override_person_gedcom_id` links the match to its mention but does not change
+  `match_confidence`.
+- `silver_document_person_override` is deprecated but still wired into matching. Don't add rows;
+  use aliases or the mention-level pin.
+- A file whose only `silver_document_person` matches are LOW is excluded from `notebook_02`
+  (scoping and mention linking use HIGH or MEDIUM only), so a forced run brings in 0 files. Raise
+  the confidence before extracting. This can go once the LOW-matches task lands.
 - Cell 5/5c log implausible forced matches to `silver_document_match_exception` instead of
   forcing them.
 - The NewspaperClipping postdate-death exemption is scoped to NewspaperClipping only. Extending it
