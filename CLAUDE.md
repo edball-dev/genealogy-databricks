@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+@README.md
+
 Topic detail lives in `.claude/rules/` (scoring, ocr-and-matching,
 data-quality, dna-and-story). This file holds the rules that apply to
 every change in this repo.
@@ -9,8 +11,8 @@ every change in this repo.
 ## Working agreements
 
 - **Never guess table or column names.** If unsure which columns a table has,
-  stop and ask, or check the live schema (Databricks MCP `describe_table`, or run
-  `notebook_schema_export.ipynb`).
+  stop and ask, or check the live schema (Databricks MCP `describe_table`, or the schema
+  doc that `notebook_schema_export.ipynb` writes to Drive, linked in the README).
 - Notebook output is `.ipynb` with SQL/Python cells, markdown headers explaining
   context, and inline comments for design choices, so it can be imported directly.
   If the `databricks-notebook` skill is available, read it before writing cells
