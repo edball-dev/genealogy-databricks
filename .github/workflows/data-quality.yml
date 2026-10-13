@@ -1,8 +1,8 @@
 name: Data Quality
 
+# Manual only: the checks query live Databricks, so running them on every
+# merge burns warehouse usage and tests data before the change is deployed.
 on:
-  push:
-    branches: [main]
   workflow_dispatch: {}
 
 jobs:

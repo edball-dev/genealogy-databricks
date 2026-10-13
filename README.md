@@ -21,7 +21,7 @@ Genealogy Research Assistant app and the Claude research skills.
 
 - Notebooks (`.ipynb`) and SQL scripts that build the tables and views.
 - `tests/data_quality/` - data-quality suite (Tier 1 YAML registry, Tier 2 SQL checks).
-- `.github/workflows/data-quality.yml` - runs the suite on push to `main` or manually.
+- `.github/workflows/data-quality.yml` - runs the suite manually (workflow dispatch only).
 
 ## Running the data-quality suite
 
