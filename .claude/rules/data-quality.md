@@ -10,8 +10,9 @@ Check-file format, Tier 1 check types, run surfaces, flags and Asana behaviour:
 - `ref_data_quality_registry` is synced by full DELETE + reinsert, so `--layer`/`--object`
   filters must never narrow it (`sync_registry_table` always gets the complete object list).
 - `data_quality_suite.ipynb` never files Asana tasks; only CI / `run_checks.py` does.
-- Only a newly failing `critical` check turns CI red. CI runs on push to `main` and manual
-  dispatch only (no nightly schedule).
+- Only a newly failing `critical` check turns CI red. CI runs on manual dispatch only (no
+  push trigger, no nightly schedule), since the checks query live Databricks and a merge does not
+  deploy anything there.
 - Tier 2 IDs are stable and never renumbered (DQ-003 and DQ-007 are intentionally absent).
 - Validate a new check's baseline row count against live data before shipping it.
 - A check and the algorithm it guards share the same tolerance window; change them together.
