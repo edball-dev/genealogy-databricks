@@ -1,39 +1,40 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # Notebook 02: Fact Extraction via Gemini
+# MAGIC # Notebook 02 v2.8: Fact Extraction via Gemini
 # MAGIC
 # MAGIC Reads OCR pages and the people mentioned on them (silver_transcript_person_mention), calls Gemini once per page (or per chunk of a long page) to extract structured facts for EVERY person on the page, attaches each person's facts to the tree person linked via silver_document_person (file_id, page_index, person_index), writes to gold_transcript_facts.
 # MAGIC
 # MAGIC Run on Databricks serverless compute. Requires GCP credentials in secret scope 'genealogy', key 'gcp_service_account_json'.
+# MAGIC Needs notebook_02_schema_and_cleanup.sql applied first (and the `override_person_gedcom_id` column, see notebook_01 Cell 5d2).
 # MAGIC
-# MAGIC **Change log:**
-# MAGIC - v1: Initial version
-# MAGIC - v1.1: Align Gemini initialisation, call pattern, and JSON extraction with ocr_pipeline v3.2:
-# MAGIC         use from_service_account_info + explicit credentials object (not GOOGLE_APPLICATION_CREDENTIALS env var);
-# MAGIC         add generation_config (temperature=0.1, max_output_tokens=8192) to generate_content call;
-# MAGIC         add safety block detection on candidates/parts;
-# MAGIC         replace fence-stripping JSON extraction with outermost-brace regex (more robust);
-# MAGIC         add before_sleep retry logging;
-# MAGIC         align model name with ocr_pipeline (gemini-3-pro-preview)
-# MAGIC - v1.2: Add `inferred` boolean field to fact schema and prompt.
-# MAGIC         Instructs Gemini to set inferred=true when a fact is derived from context
-# MAGIC         rather than explicitly stated (e.g. birth_year calculated from age_at_doc).
-# MAGIC         Downstream: gold_fact_comparison can weight inferred facts as weaker evidence.
-# MAGIC - v1.3: Migrate from deprecated vertexai.generative_models SDK to google-genai SDK.
-# MAGIC         vertexai.generative_models is deprecated as of June 2025, removed June 2026.
-# MAGIC         New pattern: google-genai client (client.models.generate_content) with
-# MAGIC         types.GenerateContentConfig. Credentials passed via google.auth directly.
-# MAGIC - v1.4: Fix collateral-household fact-extraction gap (Asana 1218420653379642).
-# MAGIC         Cell 3's NOT EXISTS guard was scoped to file_id alone, so once any
-# MAGIC         person on a file had facts extracted, every other silver_document_person
-# MAGIC         row for that same file (a Cell 5b spouse-inference row, or a Cell 5e
-# MAGIC         household-member row) was silently skipped forever. Now scoped to
-# MAGIC         (file_id, person_gedcom_id). Also stopped feeding every row the
-# MAGIC         filename-parsed forename/surname regardless of which person the row is
-# MAGIC         actually about — now pulls the matched person's own given_name/surname
-# MAGIC         via gold_person_life, so a household member's row asks Gemini to extract
-# MAGIC         facts about *that* person, not the file's primary/filename subject.
+# MAGIC ## Summary
 # MAGIC
+# MAGIC - **Unit of work is the page.** Gemini is given the people on the page (person_index, name as written, role, age, detail) and returns facts per person_index. Facts reach a tree person through silver_document_person.person_index, so the filename/matcher anchor stays and Gemini does not hunt the page for a tree name. Unlinked mentions are extracted with a NULL person_gedcom_id and never guessed. Linking of filename/primary matches to a mention (name variants, census age tie-break) lives in notebook_01 Cell 5h2, not here: a person with no person_index is simply left unlinked.
+# MAGIC - **Link guards.** Census links whose mention age disagrees with the tree birth year by >5 years are logged to silver_document_match_exception and not stored against that tree person. A mention with silver_transcript_person_mention.override_person_gedcom_id set (hand-confirmed against the image) is accepted for that person without the age check, and rejected for anyone else. The "already extracted" guard is scoped per (file_id, person_gedcom_id), and the prompt takes the matched person's own given_name/surname from gold_person_life.
+# MAGIC - **Extraction details.** Long pages are chunked (no character cut-off); page_index/person_index are stored on each fact. Age, name and (census) inferred birth_year come from the mention row, not Gemini. The prompt captures birthplace, years married, children, address and narrative detail, and tells Gemini to take facts only from the transcript, not the people list. The `inferred` flag marks facts derived from context (e.g. birth_year calculated from age_at_doc), so gold_fact_comparison can treat them as weaker evidence. fact_year is filled from a 4-digit fact_value for birth_year/death_year/marriage_year when Gemini leaves it null (notebook_03 compares on fact_year). Facts are de-duplicated across a file's pages and against earlier runs.
+# MAGIC - **Cost and run control.** `dry_run` widget (default true) reports page/call counts without calling Gemini; `max_pages` caps a run; per-page status is persisted in silver_fact_extraction_status (errors retried only with `retry_errors=true`); `force_file_ids` limits the run to exactly those files and replaces ALL of a file's existing facts, only when every page succeeded; facts, statuses and exceptions are written to Delta every `chunk_pages` pages at a file boundary, so a killed run loses at most one chunk.
+# MAGIC - **Gemini config** (aligned with ocr_pipeline): model gemini-3.1-pro-preview (gemini-3-pro-preview returns 404 on this project), thinking_level LOW, max_output_tokens 65536, google-genai SDK with explicit service-account credentials, outermost-brace JSON extraction, safety-block detection. Retries on the SDK's own APIError codes 429/500/503/504 with backoff up to 120s.
+# MAGIC
+# MAGIC ## Version history
+# MAGIC
+# MAGIC - v2.8: A mention with silver_transcript_person_mention.override_person_gedcom_id set (hand-confirmed against the image) is accepted for that
+# MAGIC         person without the age check, and rejected for anyone else. Needs the column added (see notebook_01 Cell 5d2).
+# MAGIC - v2.7: Facts, page statuses and exceptions are written to Delta every chunk_pages (default 25) pages at a file boundary, not once
+# MAGIC         at the end, so a stuck or killed run loses at most one chunk. Status rows are de-duplicated per (file, page).
+# MAGIC - v2.6: Retry on the google-genai SDK's own errors (APIError .code 429/500/503/504). The old decorator listed google.api_core
+# MAGIC         exceptions, which the SDK never raises, so quota errors were not retried and pages were marked ERROR (14 of ~250
+# MAGIC         pages in the first 200-page run). Backoff now up to 120s.
+# MAGIC - v2.5: Facts are de-duplicated across the pages of a file (and against facts from earlier runs); the prompt says to take
+# MAGIC         facts only from the transcript, not the people list.
+# MAGIC - v2.4: fact_year is filled from a 4-digit fact_value for birth_year/death_year/marriage_year when Gemini leaves it null
+# MAGIC         (notebook_03 compares on fact_year; a NULL gave CONFLICT with no severity).
+# MAGIC - v2.3: Forced re-extraction replaces ALL of a file's facts (not just legacy), only when every page succeeded. Linking of
+# MAGIC         filename/primary matches to a mention (name variants, census age tie-break) lives in notebook_01 Cell 5h2, not here:
+# MAGIC         a person with no person_index is simply left unlinked.
+# MAGIC - v2.2: force_file_ids now limits the run to exactly those files (previously they were only added to the backlog, so
+# MAGIC         max_pages could be spent on other files first).
+# MAGIC - v2.1: Align Gemini config with ocr_pipeline: model gemini-3.1-pro-preview (gemini-3-pro-preview returns 404 on this
+# MAGIC         project), thinking_level LOW, max_output_tokens 65536.
 # MAGIC - v2.0: Page-level extraction (Asana 1218420653302709). Unit is the page, not (file, person, page).
 # MAGIC         Gemini is given the people on the page (person_index, name as written, role, age, detail) and returns facts per
 # MAGIC         person_index; facts reach a tree person through silver_document_person.person_index, so the filename/matcher
@@ -46,24 +47,32 @@
 # MAGIC         census links whose mention age disagrees with the tree birth year by >5 years are logged to
 # MAGIC         silver_document_match_exception and not stored against that tree person.
 # MAGIC         Needs notebook_02_schema_and_cleanup.sql applied first.
-# MAGIC - v2.1: Align Gemini config with ocr_pipeline: model gemini-3.1-pro-preview (gemini-3-pro-preview returns 404 on this
-# MAGIC         project), thinking_level LOW, max_output_tokens 65536.
-# MAGIC - v2.2: force_file_ids now limits the run to exactly those files (previously they were only added to the backlog, so
-# MAGIC         max_pages could be spent on other files first).
-# MAGIC - v2.3: Forced re-extraction replaces ALL of a file's facts (not just legacy), only when every page succeeded. Linking of
-# MAGIC         filename/primary matches to a mention (name variants, census age tie-break) lives in notebook_01 Cell 5h2, not here:
-# MAGIC         a person with no person_index is simply left unlinked.
-# MAGIC - v2.8: A mention with silver_transcript_person_mention.override_person_gedcom_id set (hand-confirmed against the image) is accepted for that
-# MAGIC         person without the age check, and rejected for anyone else. Needs the column added (see notebook_01 Cell 5d2).
-# MAGIC - v2.7: Facts, page statuses and exceptions are written to Delta every chunk_pages (default 25) pages at a file boundary, not once
-# MAGIC         at the end, so a stuck or killed run loses at most one chunk. Status rows are de-duplicated per (file, page).
-# MAGIC - v2.6: Retry on the google-genai SDK's own errors (APIError .code 429/500/503/504). The old decorator listed google.api_core
-# MAGIC         exceptions, which the SDK never raises, so quota errors were not retried and pages were marked ERROR (14 of ~250
-# MAGIC         pages in the first 200-page run). Backoff now up to 120s.
-# MAGIC - v2.5: Facts are de-duplicated across the pages of a file (and against facts from earlier runs); the prompt says to take
-# MAGIC         facts only from the transcript, not the people list.
-# MAGIC - v2.4: fact_year is filled from a 4-digit fact_value for birth_year/death_year/marriage_year when Gemini leaves it null
-# MAGIC         (notebook_03 compares on fact_year; a NULL gave CONFLICT with no severity).
+# MAGIC - v1.4: Fix collateral-household fact-extraction gap (Asana 1218420653379642).
+# MAGIC         Cell 3's NOT EXISTS guard was scoped to file_id alone, so once any
+# MAGIC         person on a file had facts extracted, every other silver_document_person
+# MAGIC         row for that same file (a Cell 5b spouse-inference row, or a Cell 5e
+# MAGIC         household-member row) was silently skipped forever. Now scoped to
+# MAGIC         (file_id, person_gedcom_id). Also stopped feeding every row the
+# MAGIC         filename-parsed forename/surname regardless of which person the row is
+# MAGIC         actually about — now pulls the matched person's own given_name/surname
+# MAGIC         via gold_person_life, so a household member's row asks Gemini to extract
+# MAGIC         facts about *that* person, not the file's primary/filename subject.
+# MAGIC - v1.3: Migrate from deprecated vertexai.generative_models SDK to google-genai SDK.
+# MAGIC         vertexai.generative_models is deprecated as of June 2025, removed June 2026.
+# MAGIC         New pattern: google-genai client (client.models.generate_content) with
+# MAGIC         types.GenerateContentConfig. Credentials passed via google.auth directly.
+# MAGIC - v1.2: Add `inferred` boolean field to fact schema and prompt.
+# MAGIC         Instructs Gemini to set inferred=true when a fact is derived from context
+# MAGIC         rather than explicitly stated (e.g. birth_year calculated from age_at_doc).
+# MAGIC         Downstream: gold_fact_comparison can weight inferred facts as weaker evidence.
+# MAGIC - v1.1: Align Gemini initialisation, call pattern, and JSON extraction with ocr_pipeline v3.2:
+# MAGIC         use from_service_account_info + explicit credentials object (not GOOGLE_APPLICATION_CREDENTIALS env var);
+# MAGIC         add generation_config (temperature=0.1, max_output_tokens=8192) to generate_content call;
+# MAGIC         add safety block detection on candidates/parts;
+# MAGIC         replace fence-stripping JSON extraction with outermost-brace regex (more robust);
+# MAGIC         add before_sleep retry logging;
+# MAGIC         align model name with ocr_pipeline (gemini-3-pro-preview)
+# MAGIC - v1: Initial version
 # MAGIC
 # COMMAND ----------
 
