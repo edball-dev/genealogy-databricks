@@ -1,12 +1,29 @@
 -- Databricks notebook source
 -- MAGIC %md
--- MAGIC # Notebook 03: Fact Comparison — Tree vs Transcript
+-- MAGIC # Notebook 03 v1.4: Fact Comparison — Tree vs Transcript
 -- MAGIC
 -- MAGIC Compares gold_transcript_facts against gold_person_life and gold_person_event_timeline.
 -- MAGIC Run after notebook_02_fact_extraction has completed.
 -- MAGIC
--- MAGIC **Change log:**
--- MAGIC - v1: Initial version
+-- MAGIC ## Summary
+-- MAGIC
+-- MAGIC Truncates and refills the gold_fact_comparison table (this notebook creates no views: a view recreate here would transfer view ownership to whoever runs it). The views that read it live in views_document_and_fact_review and must already exist; run that notebook only on definition changes. Ed's review marks come from silver_fact_conflict_review (prerequisite: notebook_fact_conflict_review_init.sql), applied by the view gold_fact_comparison_reviewed. Consumers counting or listing conflicts should use its is_open_conflict flag. Reason code TREE_GAP (a legitimate occupation the tree should record) is never an open conflict and applies even if the tree's occupation list later changes; `is_tree_gap` is TRUE only while the tree still lacks the value and self-clears when the comparison becomes MATCH. The worklist view gold_housekeeping_tree_gap_occupations is likewise in views_document_and_fact_review.
+-- MAGIC
+-- MAGIC The occupation comparison (Cell 4) is many-to-many: the transcript value is matched against all of the person's tree occupations (MATCH if any matches; tree_value shows them pipe-separated), military ranks (Pte, Cpl, Sgt etc.) are excluded, and occupation conflicts get conflict_severity = LOW. All transcript CTEs use DISTINCT to stop multi-page PDFs fanning out into duplicate comparison rows.
+-- MAGIC
+-- MAGIC ## Version history
+-- MAGIC
+-- MAGIC - v1.4 (2026-10-11): view DDL moved out to views_document_and_fact_review. This notebook only
+-- MAGIC         refreshes the gold_fact_comparison table (a view recreate here would transfer view ownership
+-- MAGIC         to whoever runs it). Prerequisite: the views exist (run that notebook only on definition changes).
+-- MAGIC - v1.3: TREE_GAP review outcome (task 1219234333541171). Reason code TREE_GAP = legitimate
+-- MAGIC         occupation the tree should record. Never an open conflict; applies even if the tree's
+-- MAGIC         occupation list later changes; `is_tree_gap` is TRUE only while the tree still lacks the
+-- MAGIC         value (self-clears when the comparison becomes MATCH). The worklist view
+-- MAGIC         `gold_housekeeping_tree_gap_occupations` is likewise in views_document_and_fact_review.
+-- MAGIC - v1.2: view gold_fact_comparison_reviewed (now in views_document_and_fact_review), applying Ed's review marks from
+-- MAGIC         silver_fact_conflict_review (see notebook_fact_conflict_review_init.sql — prerequisite).
+-- MAGIC         Consumers counting/listing conflicts should use its is_open_conflict flag.
 -- MAGIC - v1.1: Add DISTINCT to all transcript CTEs to prevent page-level fan-out from
 -- MAGIC         multi-page PDFs producing duplicate comparison rows per fact per document.
 -- MAGIC         Cell 4 (occupation): rewrite as many-to-many comparison — transcript value
@@ -14,17 +31,7 @@
 -- MAGIC         occupation matches; tree_value shows all occupations pipe-separated.
 -- MAGIC         Cell 4: add military rank exclusion filter (Pte, Cpl, Sgt etc.).
 -- MAGIC         Cell 4: add conflict_severity = LOW for occupation conflicts (was NULL).
--- MAGIC - v1.2: view gold_fact_comparison_reviewed (now in views_document_and_fact_review), applying Ed's review marks from
--- MAGIC         silver_fact_conflict_review (see notebook_fact_conflict_review_init.sql — prerequisite).
--- MAGIC         Consumers counting/listing conflicts should use its is_open_conflict flag.
--- MAGIC - v1.3: TREE_GAP review outcome (task 1219234333541171). Reason code TREE_GAP = legitimate
--- MAGIC         occupation the tree should record. Never an open conflict; applies even if the tree's
--- MAGIC         occupation list later changes; `is_tree_gap` is TRUE only while the tree still lacks the
--- MAGIC         value (self-clears when the comparison becomes MATCH). The worklist view
--- MAGIC         `gold_housekeeping_tree_gap_occupations` is likewise in views_document_and_fact_review.
--- MAGIC - v1.4 (2026-10-11): view DDL moved out to views_document_and_fact_review. This notebook only
--- MAGIC         refreshes the gold_fact_comparison table (a view recreate here would transfer view ownership
--- MAGIC         to whoever runs it). Prerequisite: the views exist (run that notebook only on definition changes).
+-- MAGIC - v1: Initial version
 
 -- COMMAND ----------
 
