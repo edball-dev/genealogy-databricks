@@ -1,5 +1,5 @@
 -- id: DQ-020
--- title: staging_google_drive.documents has two file_ids for the same Drive path
+-- title: staging_google_drive.documents has two live file_ids for the same Drive path
 -- severity: info
 -- guards_bug:
 -- known_failing:
@@ -29,9 +29,21 @@
 --   the other 12 have not been triaged and may include further HALLAM/
 --   STIRLING-style cases worth checking against their own ocr_transcriptions
 --   rows.
+--
+--   Tuned 2026-10-13 (Asana 1219441364495584, same fix as DQ-018): only rows
+--   with _fivetran_deleted = FALSE are counted. Triage of the 16 violations
+--   found 13 were a live file_id plus a permanently stuck tombstone of a
+--   superseded id (nothing downstream references them, and they never
+--   clear), 1 was a path with both ids deleted (file parked in 'Documents
+--   _Skipped'), and 1 was a genuine live duplicate (two different documents
+--   sharing a filename, fixed by renaming). Tombstones are the expected
+--   permanent baseline, so counting them made the check unable to reach
+--   zero; the real purpose is surfacing live duplicates, so a nonzero
+--   result now warrants a manual look.
 
 SELECT _fivetran_file_path, COUNT(DISTINCT file_id) AS distinct_file_ids,
        COLLECT_SET(file_id) AS file_ids
 FROM staging_google_drive.documents
+WHERE _fivetran_deleted = FALSE
 GROUP BY _fivetran_file_path
 HAVING COUNT(DISTINCT file_id) > 1;
