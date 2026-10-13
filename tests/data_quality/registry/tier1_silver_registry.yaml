@@ -575,7 +575,7 @@ objects:
         severity: critical
         notes: >
           Manually curated, full CREATE OR REPLACE rebuild per
-          story_plan_chapters_load_v1.ipynb ("re-run only when the Sixty
+          story_plan_chapters_load_v2.ipynb ("re-run only when the Sixty
           Stories plan doc changes") — no FK check on person_gedcom_ids
           (an ARRAY<STRING>, would need an UNNEST-based check type this
           registry doesn't have yet).

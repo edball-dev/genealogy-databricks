@@ -69,8 +69,7 @@ every change in this repo.
 - Database is `workspace.genealogy`. Root person GEDCOM ID is `@I_967018310@`.
 - Retained but unused (do not reference in new code): `gold_research_action`,
   `gold_research_signal_action`, `ref_intent_category_weights`.
-- Retired views (do not reference in new code; `gold_priority_views`, `signal_detection` and
-  `score_calibration` are legacy files that still touch them): `gold_research_person_signals_pivoted`,
+- Retired views (do not reference): `gold_research_person_signals_pivoted`,
   `gold_person_integrity_priority`, `gold_person_narrative_priority`,
   `gold_person_integrity_next_best_actions`, `gold_person_narrative_next_best_actions`.
 - Branch lives on `gold_person_scores`; do not join `gold_person_life` for branch filtering.
@@ -81,10 +80,9 @@ every change in this repo.
   `[ancestor, ..., person]`. `is_blood_relative` is NULL for unbranched people.
 - `silver_event_source` has no direct `person_gedcom_id`; join via `silver_event_participant`.
   Person-root citations are in `silver_person_source`.
-- `silver_event_date.date_start` is a year-1 sentinel for `BEF` dates; the real year is in
-  `date_end`. `gold_event` resolves BEF to `date_end`, ABT to the range midpoint (ABT is stored
-  as a +/-1 year range), else `date_start`. Never take `date_start` unconditionally.
-  `event_sequence_by_date` still orders by `date_start`.
+- `silver_event_date.date_start` is a year-1 sentinel for `BEF` dates and ABT is a +/-1 year range;
+  never take `date_start` unconditionally. `gold_event` (see `views_core_gold`) resolves BEF to
+  `date_end` and ABT to the range midpoint. `event_sequence_by_date` still orders by `date_start`.
 - GEDCOM header lines (HEAD, SUBM, the Ancestry `1 SOUR`) have NULL `record_xref`. New
   person- or event-level builds must require `record_xref IS NOT NULL`. When a not-null check
   fails, compare silver with raw `bronze_gedcom_with_record` first: a 1:1 match means the gap
@@ -119,32 +117,25 @@ Layers are encoded in table prefixes: `bronze_*`, `control_*`, `silver_*`, `gold
 
 1. **GEDCOM tree pipeline**, numbered notebooks, run in order: `01_ingest_gedcom` (Ancestry GEDCOM from a Fivetran-synced Drive volume → `bronze_gedcom`; idempotent, raises `SKIP_PIPELINE` if the file id was already ingested) → `02_enrich` → `03a`/`03b` (events, sources) → `04_process_silver_tables` → `05a_parse_dates` / `05b_normalise_places` → `06_create_canonical_places` → `07_materialise_gold_tables` → `08_generate_ancestral_depth_and_proximity`. Each notebook's markdown header states its run-order prerequisites; read it before running.
 2. **Document/OCR pipeline** (scanned records on Google Drive): `ocr_pipeline` (nightly Gemini transcription + person-mention extraction → `ocr_transcriptions`, `ocr_processing_log`) → `notebook_01_document_matching` (matches mentions/documents to tree people; many lettered cells 5, 5b…5j that must run in order) → `notebook_02_fact_extraction.py` (Gemini facts → `gold_transcript_facts`) → `notebook_03_fact_comparison.sql` (transcript facts vs tree facts; reviewed via `silver_fact_conflict_review`).
-3. **Signals / scores / planning layer**: `notebook_A_ref_actions_and_signals` → `notebook_B_person_signals` (`gold_research_person_signals`; needs Notebook A and 08 first) → `notebook_D_person_scores`, `gold_game_scores`, `score_calibration`, `notebook_scores_snapshot` (append-only history), plus `notebook_dna_load`/`notebook_dna_gold`, `notebook_week_plan`, `story_plan_*`, `person_story_status`.
-4. **Views** live in `views_*.ipynb` and are deliberately split from table-building notebooks: recreating a view changes its ownership to whoever runs it, so run view notebooks only when definitions change.
-5. `lib_*.ipynb` are shared helpers (`%run`-style): `lib_helper_utils` (e.g. `merge_place_canonicals`), `lib_gedcom_text_utils`.
-6. `migration_*.ipynb` are one-off, dated schema migrations.
+3. **Signals / scores / planning layer**: `notebook_A_ref_actions_and_signals` → `notebook_B_person_signals` (`gold_research_person_signals`; needs Notebook A and 08 first) → `notebook_D_person_scores`, `notebook_scores_snapshot` (append-only history), plus `notebook_dna_load`/`notebook_dna_gold`, `notebook_week_plan`, `story_plan_*`, `person_story_status`.
+4. `lib_*.ipynb` are shared helpers (`%run`-style): `lib_helper_utils` (e.g. `merge_place_canonicals`), `lib_gedcom_text_utils`.
+5. `migration_*.ipynb` are one-off, dated schema migrations.
 
 Cross-notebook dependencies are mostly implicit via table names — when changing a table's columns, grep for the table across all notebooks (and the DQ registries) before editing.
 
 
 ## Conventions
 
-- Notebooks carry long inline changelogs/version headers; when you change one, update its header in the same style.
+- **Notebook headers**: open with a short current-state summary (purpose, run order, what it
+  builds, key design rules), then the version history below it. When you change a notebook,
+  update the summary so it describes the code as it is now, and add a dated entry to the history
+  rather than rewriting the history. Don't repeat in a header what `CLAUDE.md` or `.claude/rules/` already say.
 - `.ipynb` JSON is edited directly; keep cell structure intact and `%sql` cells idempotent (`CREATE OR REPLACE`, `MERGE`).
 - Many notebooks end with anomaly-check cells that should return 0 violations; preserve or extend them.
 
 ## Data-quality commands
 
-Details and architecture: `.claude/rules/data-quality.md` and `tests/data_quality/README.md`.
-
-```bash
-cd tests/data_quality
-pip install -r requirements.txt
-export DATABRICKS_HOST=... DATABRICKS_TOKEN=... DATABRICKS_WAREHOUSE=...   # all required; ASANA_PAT optional
-python run_checks.py                                  # everything
-python run_checks.py --only DQ-001,DQ-006             # specific check IDs (Tier 1 IDs look like T1-FRESHNESS_VS_SOURCE-GOLD_DNA_COVERAGE)
-python run_checks.py --severity critical
-python run_checks.py --layer silver --object genealogy.silver_person   # Tier 1 only; never affects Tier 2 or the registry sync
-```
-
-Exit is non-zero only if a `critical` check *newly* fails. When adding a Tier 2 check, validate the SQL against live data first and confirm the baseline row count; see `tests/data_quality/README.md` for the full format and `SODA_PILOT_OUTCOME.md` for why a hand-rolled registry was chosen over Soda.
+Run from `tests/data_quality/` with `DATABRICKS_HOST`, `DATABRICKS_TOKEN` and
+`DATABRICKS_WAREHOUSE` set (`ASANA_PAT` optional): `python run_checks.py` (add `--only`,
+`--severity`, `--layer`, `--object` to narrow). Flags, formats and check types are in
+`tests/data_quality/README.md`; behaviour rules are in `.claude/rules/data-quality.md`.

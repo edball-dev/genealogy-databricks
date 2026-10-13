@@ -10,9 +10,8 @@ Applies when working on `ocr_pipeline`, `notebook_01_document_matching`, `notebo
   Model: Vertex AI Gemini (GCP project `genealogy-488213`). Runs nightly at 2am UTC
   (`max_files=50`, `max_retries=3`).
 - Person mentions are extracted in the same Gemini call as transcription (per page).
-  `ocr_pipeline.ipynb` owns `silver_transcript_person_mention` (idempotent schema cell). The old
-  `notebook_person_mention_schema_init.ipynb` is historical: its `CREATE OR REPLACE` would
-  destroy real data. Key is `(file_id, page_index, person_index)`.
+  `ocr_pipeline.ipynb` owns `silver_transcript_person_mention` (idempotent schema cell); never
+  `CREATE OR REPLACE` it, as that would destroy real data. Key is `(file_id, page_index, person_index)`.
 - Prompt is two-step: classify `doc_type_detected` first, then apply that type's extra roles
   on top of the shared `FAMILY_RELATION_ROLES` vocabulary.
 - `ocr_transcriptions` has **one row per page**, not per file. Any per-file join, especially

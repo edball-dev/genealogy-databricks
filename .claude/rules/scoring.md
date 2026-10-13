@@ -9,37 +9,29 @@ Applies when working on person signals, scores, branch scores or the weekly snap
 
 ## Formulas
 
-- Completeness and evidence: absolute 0-100 against the person's own applicable maximum.
-- Story potential: `PERCENT_RANK()` over `narr_fired`.
-- Overall: completeness x 0.40 + evidence x 0.60.
+Score formulas and the proximity/depth multiplier tables are in the `notebook_D_person_scores`
+header; read them there. Not covered there:
+
 - Weighted scores multiply by proximity/depth multipliers for ORDER BY display only.
 - `person_priority` = proximity_priority x depth_priority, used only for action-list ordering.
 - Action list: `priority_order = base_score x person_priority`, then `weighted_overall_score ASC`.
   `estimated_delta = (base_score / applicable_max) x 100 x dimension_weight`. One row per
   person (their best signal), top 15.
-- Priority and score use opposite multiplier directions. Priority boosts direct ancestors
-  (proximity 0 -> 3.00, 1 -> 2.00, 2 -> 1.25, 3+ -> 1.00; depth <=4 -> 1.40, 5-6 -> 1.20,
-  7-8 -> 1.00, 9+ -> 0.80). Display multipliers do the inverse (0 -> 1.00, 1 -> 1.25,
-  2 -> 1.50, 3+ -> 2.00).
+- Priority and display multipliers run in opposite directions (priority boosts direct ancestors).
 - Signal filter defaults by mode: completeness -> tree_building, evidence -> housekeeping,
   dna -> dna, all -> story_writing. Narrative signals are always excluded.
 
 ## Adding a new signal
 
-1. Add the boolean to `gold_research_person_signals` (notebook B).
-2. Add it to the `UNPIVOT IN(...)` in notebook D Cell 1.
-3. Insert a row in `ref_signal_weights` (include `outcome_label`; set
-   `requires_blood_relative` if appropriate).
-4. No action mapping is needed.
-
-Query live `ref_signal_weights` first. The signal list (completeness, evidence, narrative
-categories) lives there, not in this file.
+Steps are in the `notebook_D_person_scores` header. Also set `outcome_label` on the
+`ref_signal_weights` row, and `requires_blood_relative` if appropriate. No action mapping is
+needed. Query live `ref_signal_weights` first; the signal list lives there, not in this repo.
 
 ## Rules that have bitten before
 
-- `requires_blood_relative` must be evaluated **before** `applies_always` in notebook D.
-  Some signals carry both flags. `is_blood_relative` is set at build time in notebook 08
-  (a `NOT EXISTS` guard on spouse inserts makes it mutually exclusive by construction).
+- `requires_blood_relative` is evaluated before `applies_always` in notebook D (explained in the
+  code). `is_blood_relative` is set at build time in notebook 08 (a `NOT EXISTS` guard on spouse
+  inserts makes it mutually exclusive by construction).
 - Use `MIN_BY(p.is_blood_relative, p.ancestral_proximity)` for boolean context columns,
   not `MIN()`: it picks the value from the closest-proximity row.
 - Score-0 signals (`SIGNAL_UNCONFIRMED_MILITARY`, `POSSIBLE_*`) fire as hints but add
@@ -53,14 +45,6 @@ categories) lives there, not in this file.
   `SIGNAL_TRANSCRIPT_ONLY_FACTS` counts occupation rows only when `is_tree_gap`.
 - A materialised table (e.g. `gold_research_person_signals`) keeps serving old data after an
   upstream view fix until its notebook is re-run. Check `DESCRIBE HISTORY`.
-
-## Legacy scoring files (do not extend)
-
-`gold_game_scores` also defines `gold_person_scores` / `gold_branch_scores` as views, from the
-retired integrity/narrative priority views and a 35/40/25 weighting. Notebook D defines the same
-names with the formulas above; whichever ran last wins, so run only notebook D.
-`gold_priority_views` and `signal_detection` define the retired views, and `score_calibration`
-still reads them.
 
 ## Scoring notebooks
 

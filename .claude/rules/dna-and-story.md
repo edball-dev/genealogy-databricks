@@ -35,7 +35,7 @@ notebooks 01-08 and beyond. A separate, manual OCR workflow runs `ocr_pipeline` 
 - `story_ready` = `story_potential_score >= 90 AND overall_score >= 70 AND story_written = FALSE`.
 - The Sixty Stories plan (60 chapters) is mapped chapter -> `gedcom_id` in
   `silver_story_plan_chapters`, manually curated and re-run only when the plan doc changes
-  (`story_plan_chapters_load_v1.ipynb`). Plan subjects are the primary driver; data-driven
+  (`story_plan_chapters_load_v2.ipynb`). Plan subjects are the primary driver; data-driven
   candidates are secondary.
 - Views: `gold_story_plan_people`, `gold_story_pipeline`, `gold_story_candidates_by_branch`
   (defined in `views_story_plan`).
