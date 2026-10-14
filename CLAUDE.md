@@ -93,6 +93,9 @@ every change in this repo.
 - GEDCOM IDs contain `@`; underscore-prefixed IDs become negative Ancestry IDs.
 - Document filename convention: `SURNAME_Forename_YYYY_DocType.ext` (the date is the
   document date, not the birth date).
+  Optional person-id token before the extension, e.g. `PALMER_Samuel_1921_Census [I_967018131].jpg`:
+  the GEDCOM id without the `@`s pins the primary match (see `.claude/rules/ocr-and-matching.md`);
+  `[NONE]` means the document is not about anyone in the tree.
 - A child listed under two families of a parent with two spouses trips the silver
   uniqueness checks. Fix in Ancestry, re-download the GEDCOM, re-run the pipeline.
 - A shared `ref_*` table synced by full DELETE + reinsert must always be synced from the
