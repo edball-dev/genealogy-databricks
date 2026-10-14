@@ -41,10 +41,12 @@ Applies when working on `ocr_pipeline`, `notebook_01_document_matching`, `notebo
 
 - **Alias matching needs literal string equality** (`UPPER(TRIM(...))`). An alias does not help
   a document that spells the surname differently, however close.
-- **Manual aliases go in the Cell 1 VALUES list, never a direct INSERT.** Cell 1 rebuilds
-  `silver_person_alias` with `CREATE OR REPLACE TABLE` (auto MARRIED_NAME and FATHER_SURNAME rows
-  plus the manual list). After adding rows: re-run Cell 1, the matching cells,
-  `refresh_gold_source_coverage`, notebook 03, then notebook B.
+- **`silver_person_alias` is hand-maintained and no notebook rebuilds it.** Cell 1 only does
+  `CREATE TABLE IF NOT EXISTS`. Add all aliases (MARRIED_NAME, FATHER_SURNAME, DOCUMENT_NAME,
+  SURNAME_VARIANT) with `INSERT` via the MCP `execute_write_sql`; never put `CREATE OR REPLACE` or
+  `TRUNCATE` on it. Married and father surnames are no longer derived, so a new marriage needs its
+  row added by hand. After adding rows: re-run the matching cells, `refresh_gold_source_coverage`,
+  notebook 03, then notebook B.
 - **Spouse inference applies to marriage certificates only** (structurally unambiguous via
   `silver_family`), with a year guard of +/-2 of that family unit's marriage year.
   Cell 5e extends the idea to Census/BurialRegister with a second independent guard: the relative
