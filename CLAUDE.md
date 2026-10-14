@@ -50,6 +50,9 @@ every change in this repo.
   `notebook_ancestor_coverage_view` and the `notebook_housekeeping_*.sql` files are view-only
   notebooks, so the same ownership caveat applies when running them. `CREATE OR REPLACE TABLE`
   keeps owner and history.
+- A Databricks git folder with uncommitted notebook output blocks `repo_checkout_branch` and `repo_pull`,
+  and the MCP cannot discard it, so reset the folder in the Databricks UI. Scheduled jobs run whatever
+  branch is checked out, so switch back to `main` straight after testing a branch.
 - `run_notebook` (MCP) runs whole notebooks only, so a step that must run alone
   needs its own notebook.
 - **Refresh order after a date or year change**: `views_core_gold` (only if the

@@ -44,9 +44,9 @@ Applies when working on `ocr_pipeline`, `notebook_01_document_matching`, `notebo
 - **`silver_person_alias` is never rebuilt.** Notebook_01 Cell 1 only does `CREATE TABLE IF NOT EXISTS`.
   Add manual aliases (DOCUMENT_NAME, SURNAME_VARIANT, nickname MARRIED_NAME) with `INSERT` via the MCP
   `execute_write_sql`; never put `CREATE OR REPLACE` or `TRUNCATE` on it. Derived MARRIED_NAME and
-  FATHER_SURNAME rows come from `notebook_sync_derived_aliases`, which is insert-only and runs after
-  notebook 07 on each GEDCOM ingest; it never removes rows, so a stale derived row must be deleted
-  by hand. After adding rows: re-run the matching cells, `refresh_gold_source_coverage`, notebook 03,
+  FATHER_SURNAME rows come from `notebook_sync_derived_aliases` (job task `Sync_Derived_Aliases`, after
+  `Materialise_Gold_Tables` in the GEDCOM job), which is insert-only; it never removes rows, so a stale
+  derived row must be deleted by hand. DQ-026 reports derived rows that are missing or stale. After adding rows: re-run the matching cells, `refresh_gold_source_coverage`, notebook 03,
   then notebook B.
 - **Spouse inference applies to marriage certificates only** (structurally unambiguous via
   `silver_family`), with a year guard of +/-2 of that family unit's marriage year.
