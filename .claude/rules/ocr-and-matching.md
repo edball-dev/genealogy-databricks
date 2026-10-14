@@ -36,6 +36,7 @@ Applies when working on `ocr_pipeline`, `notebook_01_document_matching`, `notebo
   `ocr_pipeline.ipynb`. Job schedule and parameters live in Databricks, not in this repo.
 - Do not run the OCR Pipeline job through the MCP `run_job`: it processes up to 100 files and
   `max_files` is a task-level parameter.
+- The Databricks MCP identity cannot read the `genealogy` secret scope, so a non-dry `notebook_02_fact_extraction` run (Gemini calls) has to be started by Ed in the Databricks UI. Dry runs work from the MCP.
 
 ## Matching rules (notebook_01)
 
@@ -64,6 +65,8 @@ Applies when working on `ocr_pipeline`, `notebook_01_document_matching`, `notebo
   Cell 5e extends the idea to Census/BurialRegister with a second independent guard: the relative
   must appear in the document's own extracted `personal_names` and be alive in the document year.
   Confidence is MEDIUM, not HIGH.
+- The id token must use an underscore or no separator (`[I_967018131]`, `[I332310876241]`). A hyphen (`[I-967018131]`) is silently ignored by the matcher and DQ-028, so the file falls back to name matching.
+- `notebook_01` Cell 5 truncates `silver_document_person` on every run: a pinned match never needs a delete-and-reinsert, only a re-run.
 - Mention-to-match link: `silver_document_person` has nullable `page_index` and `person_index`.
   Key is `(file_id, page_index, person_index)`, joined null-safe (`<=>`). NULL means no known
   mention. Cell 5e writes it directly; Cell 5h2 links other rows by first forename and last name
