@@ -53,8 +53,8 @@ Always verify what a signal or column means from its source notebook before tell
 `TRANSCRIPTION_ERROR`, `WRONG_PERSON_MATCH`, `TREE_CORRECTED`, `MINOR_AGE_DRIFT`, `TREE_GAP`,
 `NOT_AN_OCCUPATION`, `OTHER`. `TREE_GAP` and `NOT_AN_OCCUPATION` apply to `fact_type = 'occupation'` only.
 
-`PLACE_GRANULARITY` and `PLACE_SPELLING` are both `FALSE_POSITIVE` reasons. **`LIFE_STAGE_OCCUPATION` is deprecated:**
-never use it for new marks (use `NOT_AN_OCCUPATION`). DQ-022 still accepts it so existing rows keep validating.
+`PLACE_GRANULARITY` and `PLACE_SPELLING` are both `FALSE_POSITIVE` reasons. **`LIFE_STAGE_OCCUPATION` has been removed** from DQ-022's allowed list (no existing rows used it).
+Never write it; use `NOT_AN_OCCUPATION` for life-stage cases.
 
 Prefer fixing wrong-person matches with a pin over a `WRONG_PERSON_MATCH` mark: a mark only hides the row, the wrong match
 still feeds evidence scores. If one is already there, delete it once the pinned match has replaced the conflict.
