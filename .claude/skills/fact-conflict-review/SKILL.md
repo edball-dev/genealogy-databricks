@@ -33,11 +33,12 @@ Check the pattern across the *whole file* before deciding on a single row.
 | Only the household member rows conflict, the pinned primary is fine | Wrong household link (a same-named relative) | Mention-level `override_person_gedcom_id` on `silver_transcript_person_mention`, then re-run. |
 | Transcript value is wrong against the image | OCR/transcription error | Use `ocr-transcription-correction`. Mark `TRANSCRIPTION_ERROR` only if the transcript cannot be corrected. |
 | Tree value is wrong or missing and the document is accurate | Tree error | Fix the citation in Ancestry, re-download the GEDCOM, re-run the pipeline. Mark `TREE_CORRECTED` only after the tree changes. Do not paper over it with logic. |
-| Same fact, different granularity or spelling (parish vs town; Heigham vs Norwich) | Not a real conflict | `FALSE_POSITIVE` with `PLACE_GRANULARITY` or `PLACE_SPELLING`. |
+| Same place, different granularity (parish vs town; Heigham vs Norwich) | Not a real conflict | `FALSE_POSITIVE` with `PLACE_GRANULARITY`. |
+| Same place, different spelling (Dimsdale vs Dymsdale) | Not a real conflict | `FALSE_POSITIVE` with `PLACE_SPELLING`. |
 | Age/year drifts by 1-3 years on a census or certificate | Rounded or stated age | `FALSE_POSITIVE` with `MINOR_AGE_DRIFT` (adult census ages are rounded; the Census age gate is 5 years). |
 | Occupation the tree lacks but is real | Tree gap | `ACCEPTED`/`RESOLVED` is wrong here. Use reason `TREE_GAP`: it feeds `gold_housekeeping_tree_gap_occupations` and `SIGNAL_TRANSCRIPT_ONLY_FACTS`, and clears when the tree gains the occupation. |
 | Student/pupil status, club or association role recorded as an occupation | Not an occupation | `NOT_AN_OCCUPATION` (appears nowhere). |
-| Life-stage occupation (child "scholar", "at home") | Not a working occupation | `LIFE_STAGE_OCCUPATION`. |
+| Life-stage occupation (child "scholar", "at home") | Not a working occupation | `NOT_AN_OCCUPATION`. Do not use the deprecated `LIFE_STAGE_OCCUPATION`. |
 | The record itself is inconsistent (two sources disagree and a GPS assessment has resolved it) | Genuine discrepancy | `ACCEPTED`, with the assessment linked in `notes`. `ACCEPTED` is *not* a general dismissal. |
 | Cannot tell | | Ask Ed; show the image-based question, do not guess. |
 
@@ -49,8 +50,11 @@ Always verify what a signal or column means from its source notebook before tell
 `ACCEPTED` (genuine discrepancy in the record, GPS-assessed).
 
 `reason_code` (DQ-022 is **critical**, so a typo here turns CI red): `PLACE_GRANULARITY`, `PLACE_SPELLING`,
-`LIFE_STAGE_OCCUPATION`, `TRANSCRIPTION_ERROR`, `WRONG_PERSON_MATCH`, `TREE_CORRECTED`, `MINOR_AGE_DRIFT`,
-`TREE_GAP`, `NOT_AN_OCCUPATION`, `OTHER`. `TREE_GAP` and `NOT_AN_OCCUPATION` apply to `fact_type = 'occupation'` only.
+`TRANSCRIPTION_ERROR`, `WRONG_PERSON_MATCH`, `TREE_CORRECTED`, `MINOR_AGE_DRIFT`, `TREE_GAP`,
+`NOT_AN_OCCUPATION`, `OTHER`. `TREE_GAP` and `NOT_AN_OCCUPATION` apply to `fact_type = 'occupation'` only.
+
+`PLACE_GRANULARITY` and `PLACE_SPELLING` are both `FALSE_POSITIVE` reasons. **`LIFE_STAGE_OCCUPATION` is deprecated:**
+never use it for new marks (use `NOT_AN_OCCUPATION`). DQ-022 still accepts it so existing rows keep validating.
 
 Prefer fixing wrong-person matches with a pin over a `WRONG_PERSON_MATCH` mark: a mark only hides the row, the wrong match
 still feeds evidence scores. If one is already there, delete it once the pinned match has replaced the conflict.
