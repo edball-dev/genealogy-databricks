@@ -59,6 +59,15 @@ Applies when working on `ocr_pipeline`, `notebook_01_document_matching`, `notebo
   token only when the person matches exactly one unclaimed mention in the file.
 - A mention-level `override_person_gedcom_id` links the match to its mention but does not change
   `match_confidence`.
+- `Resident` mentions (Cell 5g) match the primary's family pool only, with no whole-tree fallback, so
+  lodgers stay unlinked. The pool has no children's spouses, so a son-in-law can match a same-named
+  grandchild: a `Resident` with neither age nor date of birth does not link through grandparent or
+  grandchild, and a name equal to the primary's own is skipped. Pin real exceptions with the
+  mention-level override.
+- Surname-first names are fixed at source: the `ocr_pipeline` prompt asks for forename-first and
+  DQ-027 flags regressions. Correct existing rows with a scoped UPDATE on
+  `(file_id, person_index, name_raw)`, not extra matching readings. A bare-surname Head (`Cope`) is
+  linked by Cell 5h2.
 - `silver_document_person_override` is deprecated but still wired into matching. Don't add rows;
   use aliases or the mention-level pin.
 - A file whose only `silver_document_person` matches are LOW is excluded from `notebook_02`
