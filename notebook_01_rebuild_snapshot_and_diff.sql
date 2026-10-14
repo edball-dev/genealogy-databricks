@@ -5,7 +5,7 @@
 -- MAGIC Cell 5 of notebook_01 TRUNCATEs `silver_document_person` and repopulates it; Cells 5b to 5i then add rows. The age gate, the abbreviation list and Cell 5h3 only reach rows that do not exist yet, so a rebuild is the way old household mislinks go. Run this notebook around it:
 -- MAGIC
 -- MAGIC 1. Cells 1 and 2 below: snapshot `silver_document_person` and `gold_transcript_facts` (DEEP CLONE, so the snapshot is independent of the live tables). Cell cannot be re-run once the snapshots exist: it is `CREATE TABLE`, not `CREATE OR REPLACE`, so a second run fails rather than overwriting the pre-rebuild state.
--- MAGIC 2. Run notebook_01 in order: Cell 1 (aliases, already run), Cell 4d, then Cell 5, 5b, 5c, 5d, 5e, 5f/5g/5h, 5h2, 5h3, 5i. Re-run Cells 6 to 8 afterwards so `gold_source_coverage` follows the new links.
+-- MAGIC 2. Run notebook_01 in order: Cell 4d, then Cell 5, 5b, 5c, 5d, 5e, 5f/5g/5h, 5h2, 5h3, 5i. Re-run Cells 6 to 8 afterwards so `gold_source_coverage` follows the new links.
 -- MAGIC 3. Cells 3 to 6 below: the diff. Every cell is read-only.
 -- MAGIC 4. Cell 7 is the way back, commented out.
 -- MAGIC
