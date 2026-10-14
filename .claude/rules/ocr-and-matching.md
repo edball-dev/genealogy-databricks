@@ -39,6 +39,17 @@ Applies when working on `ocr_pipeline`, `notebook_01_document_matching`, `notebo
 
 ## Matching rules (notebook_01)
 
+- **Filename-embedded person id (`FILENAME_ID`)**: a bracketed token in the file's *current* Drive name
+  (`... [I332310876241].png`, `[I_967018131]`; GEDCOM id without the `@`s) pins the primary subject: HIGH,
+  no candidate ranking. Cell 5 reads the name from `staging_google_drive.documents` (basename of
+  `_fivetran_file_path`, live rows, keyed on `file_id`), not the `ocr_transcriptions.file_name` snapshot, so a
+  rename needs no re-OCR (observed: renaming keeps the `file_id`). An id not in `gold_person_life` logs
+  `FILENAME_ID_NOT_FOUND` and does not fall back to name matching; `[NONE]` means no primary match and no
+  exception. Household/secondary cells are unchanged and anchor on the pinned person. Cell 5c excludes
+  `FILENAME_ID` rows from sibling votes. `parse_filename` strips the token before splitting. DQ-028 reports
+  ids missing from the tree. After renaming files: re-run notebook_01, then a forced `notebook_02` run
+  (`force_file_ids`) for only those files, then `refresh_gold_source_coverage`, notebook 03 and B.
+  Retire stale `WRONG_PERSON_MATCH` review marks once the pinned match supersedes them.
 - **Alias matching needs literal string equality** (`UPPER(TRIM(...))`). An alias does not help
   a document that spells the surname differently, however close.
 - **`silver_person_alias` is never rebuilt.** Notebook_01 Cell 1 only does `CREATE TABLE IF NOT EXISTS`.
