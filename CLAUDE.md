@@ -55,6 +55,10 @@ every change in this repo.
   branch is checked out, so switch back to `main` straight after testing a branch.
 - `run_notebook` (MCP) runs whole notebooks only, so a step that must run alone
   needs its own notebook.
+- `run_notebook` starts a **new run on every call**; poll with `get_run` using the returned `run_id`,
+  never by calling it again (a duplicate TRUNCATE + INSERT run is the risk). Only one serverless run
+  can be active at a time. Observed durations: `refresh_gold_source_coverage` about 14 minutes,
+  notebook 03 about 2, notebook B about 1.
 - **Refresh order after a date or year change**: `views_core_gold` (only if the
   definition changed), then notebook 07, `refresh_gold_source_coverage`, notebook 03,
   then notebook B. Score views from notebook D are live and need no rebuild.

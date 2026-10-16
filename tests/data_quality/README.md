@@ -284,10 +284,8 @@ revisit if the OCR workflow gets its own Tier 1 pass.
 ### Ref layer (`tier1_ref_registry.yaml`)
 
 Covers hand-maintained lookup/config tables: `ref_intent_category_weights`,
-`ref_signal_weights`, `ref_week_plan`, and `genealogy.v_source_doctype_map`
-(not `ref_`-prefixed, but functionally identical — its own definition is a
-literal `CREATE OR REPLACE VIEW ... AS SELECT * FROM (VALUES (...), ...)`,
-a hardcoded lookup, not a query over other tables). Excludes
+`ref_signal_weights`, `ref_week_plan`, `ref_source_doctype_map` and the view
+`genealogy.v_source_doctype_map` over it. Excludes
 `ref_research_resources` (out of scope for this whole suite, see the top of
 this file) and `ref_data_quality_registry` (this suite's own
 materialization of its registry files — checking it with itself would be

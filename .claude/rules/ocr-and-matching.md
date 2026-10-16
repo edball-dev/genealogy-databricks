@@ -109,15 +109,23 @@ Applies when working on `ocr_pipeline`, `notebook_01_document_matching`, `notebo
 - Only `BirthIndex`, `MarriageIndex`, `DeathIndex` categories give INDEX_ONLY, and `OTHER_NO_FILE`
   (or OTHER with no record id) gives NOT_APPLICABLE. Any other category with no matched document
   is UNCOVERED, so mapping a title to a typed category does not clear it.
-- `v_source_doctype_map` is a hardcoded VALUES list in `views_document_and_fact_review`. Edit it
-  there. Unmapped titles default to `OTHER`.
+- `v_source_doctype_map` is a view over the hand-maintained table `ref_source_doctype_map` (never
+  rebuilt; created and seeded by `notebook_ref_source_doctype_map`). Add or change titles with `INSERT` /
+  `UPDATE` via the MCP `execute_write_sql`, not by editing a notebook; the table must be on the MCP
+  allow-list. Unmapped titles default to `OTHER`; `gold_housekeeping_unmapped_source_titles` lists them.
+  Never map a combined-collection title (baptisms, marriages and burials in one) to a single category.
+  After a change: `refresh_gold_source_coverage`, notebook 03, then notebook B.
 - The category-to-doctype comparison is case-sensitive: an unmapped title (`OTHER`) can never
   match a file the OCR classified `Other`. Fix by mapping the title to the file's exact
-  `doc_type_detected`.
+  `doc_type_detected`; do not lower-case the join (every unmapped citation would then match any
+  `Other` file).
 - Citation-year fallback is asymmetric: Birth/Death fall back to `gold_person_life`'s year, Marriage
   has no such fallback for `citation_year` (the timeline's MARR year is only used when matching a
   document to a marriage citation). Prefer fixing the missing citation date in Ancestry.
 - Titles with a real image (school admissions, railway, NZ cemetery) are deliberately left UNCOVERED.
+- Index-only sources map to an Index category even when the provider also sells register images
+  (e.g. `Web: UK, Burial and Cremation Index` is `DeathIndex`). If images are ever bought, add a
+  separate citation for the register entry rather than remapping the index title.
 
 ## Fact conflict reviews
 
