@@ -123,6 +123,9 @@ Applies when working on `ocr_pipeline`, `notebook_01_document_matching`, `notebo
   has no such fallback for `citation_year` (the timeline's MARR year is only used when matching a
   document to a marriage citation). Prefer fixing the missing citation date in Ancestry.
 - Titles with a real image (school admissions, railway, NZ cemetery) are deliberately left UNCOVERED.
+- Index-only sources map to an Index category even when the provider also sells register images
+  (e.g. `Web: UK, Burial and Cremation Index` is `DeathIndex`). If images are ever bought, add a
+  separate citation for the register entry rather than remapping the index title.
 
 ## Fact conflict reviews
 
