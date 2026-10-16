@@ -135,13 +135,13 @@ AS SELECT
   -- overcounts because MARR events appear on both spouses' timelines.
   COALESCE(MAX(fam.num_family_units), 0)                                    AS num_family_units
 
-FROM gold_person_life p
-LEFT JOIN gold_person_event_timeline t  ON t.person_gedcom_id = p.person_gedcom_id
-LEFT JOIN silver_event_date d           ON d.event_id = t.event_id
-LEFT JOIN silver_event_source es        ON es.event_id = t.event_id
+FROM genealogy.gold_person_life p
+LEFT JOIN genealogy.gold_person_event_timeline t  ON t.person_gedcom_id = p.person_gedcom_id
+LEFT JOIN genealogy.silver_event_date d           ON d.event_id = t.event_id
+LEFT JOIN genealogy.silver_event_source es        ON es.event_id = t.event_id
                                        AND t.event_role = 'principal'
-LEFT JOIN silver_source s               ON s.record_xref = es.source_xref
-LEFT JOIN silver_relationship r         ON r.person_id_2 = p.person_gedcom_id
+LEFT JOIN genealogy.silver_source s               ON s.record_xref = es.source_xref
+LEFT JOIN genealogy.silver_relationship r         ON r.person_id_2 = p.person_gedcom_id
 -- Pre-aggregated family unit count: one row per person, so MAX() is safe
 LEFT JOIN (
   SELECT person_gedcom_id, COUNT(*) AS num_family_units
