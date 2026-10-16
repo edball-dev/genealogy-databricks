@@ -66,6 +66,8 @@ every change in this repo.
 - Hand-editing a notebook as raw JSON needs JSON escaping and SQL escaping checked
   independently (SQL apostrophes are doubled, `''`). When unsure, reword to avoid the
   apostrophe. `json.load()` will not catch invalid SQL.
+- When saving a view's DDL to the repo from `SHOW CREATE`, qualify every table as
+  `genealogy.<table>`; it prints unqualified names that only resolve in the original schema.
 - Two Spark SQL serverless gotchas: don't batch correlated `NOT EXISTS` subqueries
   across checks into one query (optimizer bug; one FK check per query), and
   `CONCAT` returning NULL silently breaks naive duplicate counts (use `GROUP BY ... HAVING COUNT(*) > 1`).
