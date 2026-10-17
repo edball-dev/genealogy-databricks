@@ -1,6 +1,6 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # Notebook 02 v2.8: Fact Extraction via Gemini
+# MAGIC # Notebook 02 v2.9: Fact Extraction via Gemini
 # MAGIC
 # MAGIC Reads OCR pages and the people mentioned on them (silver_transcript_person_mention), calls Gemini once per page (or per chunk of a long page) to extract structured facts for EVERY person on the page, attaches each person's facts to the tree person linked via silver_document_person (file_id, page_index, person_index), writes to gold_transcript_facts.
 # MAGIC
@@ -17,6 +17,11 @@
 # MAGIC
 # MAGIC ## Version history
 # MAGIC
+# MAGIC - v2.9 (2026-10-17): `include_stale_reviewed` widget (default false; Asana 1218716867008994, step 3). When true, every file with a page whose
+# MAGIC         ocr_transcriptions.reviewed_at is later than that page's silver_fact_extraction_status.attempted_at is re-extracted as a forced file
+# MAGIC         (its old facts are replaced after a successful run), in addition to the normal backlog or the force_file_ids list. This is the
+# MAGIC         reviewed_at convention applied to extraction. It is off by default because every re-extracted page is a billed Gemini call: read the
+# MAGIC         dry-run counts first.
 # MAGIC - v2.8: A mention with silver_transcript_person_mention.override_person_gedcom_id set (hand-confirmed against the image) is accepted for that
 # MAGIC         person without the age check, and rejected for anyone else. Needs the column added (see notebook_01 Cell 5d2).
 # MAGIC - v2.7: Facts, page statuses and exceptions are written to Delta every chunk_pages (default 25) pages at a file boundary, not once
@@ -93,6 +98,7 @@
 # MAGIC Widgets: `dry_run` (default true: counts pages/calls, no Gemini call, no writes), `max_pages` (hard cap on pages per run),
 # MAGIC `force_file_ids` (comma-separated file_ids to re-extract; the run is limited to them and their existing facts are replaced after a successful extraction),
 # MAGIC `retry_errors` (re-run pages whose status is ERROR; off by default so errors are not silently re-billed),
+# MAGIC `include_stale_reviewed` (also re-extract files with a page reviewed after its last attempt, as forced files; off by default because it spends Gemini calls),
 # MAGIC `chunk_pages` (facts, statuses and exceptions are written to Delta every N pages at a file boundary, so a stuck or killed run loses at most one chunk).
 
 # COMMAND ----------
@@ -126,14 +132,16 @@ dbutils.widgets.dropdown("dry_run", "true", ["true", "false"], "Dry run (no Gemi
 dbutils.widgets.text("max_pages", "25", "Max pages to process this run")
 dbutils.widgets.text("force_file_ids", "", "Comma-separated file_ids to re-extract")
 dbutils.widgets.dropdown("retry_errors", "false", ["true", "false"], "Retry pages with status ERROR")
+dbutils.widgets.dropdown("include_stale_reviewed", "false", ["true", "false"], "Also re-extract files reviewed after their last attempt")
 dbutils.widgets.text("chunk_pages", "25", "Write to Delta every N pages (at a file boundary)")
 
 DRY_RUN        = dbutils.widgets.get("dry_run") == "true"
 MAX_PAGES      = int(dbutils.widgets.get("max_pages") or 25)
 FORCE_FILE_IDS = {f.strip() for f in dbutils.widgets.get("force_file_ids").split(",") if f.strip()}
 RETRY_ERRORS   = dbutils.widgets.get("retry_errors") == "true"
+INCLUDE_STALE_REVIEWED = dbutils.widgets.get("include_stale_reviewed") == "true"
 CHUNK_PAGES    = int(dbutils.widgets.get("chunk_pages") or 25)
-print(f"dry_run={DRY_RUN} max_pages={MAX_PAGES} force_file_ids={len(FORCE_FILE_IDS)} retry_errors={RETRY_ERRORS} chunk_pages={CHUNK_PAGES}")
+print(f"dry_run={DRY_RUN} max_pages={MAX_PAGES} force_file_ids={len(FORCE_FILE_IDS)} retry_errors={RETRY_ERRORS} include_stale_reviewed={INCLUDE_STALE_REVIEWED} chunk_pages={CHUNK_PAGES}")
 
 client = None
 if not DRY_RUN:
@@ -153,18 +161,39 @@ if not DRY_RUN:
 # MAGIC ## Cell 3 — Build the work list: pages, their people, and the tree links
 # MAGIC
 # MAGIC A page is in scope when it has at least one HIGH/MEDIUM `silver_document_person` row and no row in `silver_fact_extraction_status`
-# MAGIC (or an ERROR row with `retry_errors`, or its file is in `force_file_ids`).
+# MAGIC (or an ERROR row with `retry_errors`, or its file is in `force_file_ids`, or with `include_stale_reviewed` its file has a page reviewed after that page's last attempt).
 # MAGIC Mentions with NULL `page_index` (most of them) belong to the file's only page, or, on a multi-page file, are offered to every page and
 # MAGIC Gemini returns only those present in the excerpt; duplicates are dropped on (person_index, fact_type, fact_value).
 
 # COMMAND ----------
 
 status_filter = "st.status = 'ERROR'" if RETRY_ERRORS else "FALSE"
+
+# Files with a page reviewed (Ed corrected something) after that page was last extracted. Treated like forced files below:
+# the file's old facts are replaced once every page has been re-extracted, so a corrected transcript changes the facts
+# instead of adding to the wrong ones. Opt-in because each page is a billed Gemini call (dry_run shows the counts).
+EXPLICIT_FORCE_FILE_IDS = set(FORCE_FILE_IDS)
+STALE_FILE_IDS = set()
+if INCLUDE_STALE_REVIEWED:
+    STALE_FILE_IDS = {r["file_id"] for r in spark.sql("""
+      SELECT DISTINCT ot.file_id
+      FROM genealogy.ocr_transcriptions ot
+      JOIN genealogy.silver_fact_extraction_status st ON st.file_id = ot.file_id AND st.page_index <=> ot.page_index
+      WHERE ot.reviewed_at IS NOT NULL AND ot.reviewed_at > st.attempted_at
+        AND EXISTS (SELECT 1 FROM genealogy.silver_document_person sdp
+                    WHERE sdp.file_id = ot.file_id AND sdp.match_confidence IN ('HIGH', 'MEDIUM'))
+    """).collect()}
+    print(f"include_stale_reviewed: {len(STALE_FILE_IDS)} file(s) with a page reviewed after its last extraction attempt")
+FORCE_FILE_IDS = EXPLICIT_FORCE_FILE_IDS | STALE_FILE_IDS
 force_list = ",".join("'" + f.replace("'", "") + "'" for f in FORCE_FILE_IDS) or "''"
 
-# When force_file_ids is set the run is limited to exactly those files (status ignored); otherwise the normal backlog applies.
-scope_filter = (f"ot.file_id IN ({force_list})" if FORCE_FILE_IDS
-                else f"(st.file_id IS NULL OR {status_filter})")
+# An explicit force_file_ids list limits the run to exactly those files (plus any stale files), status ignored;
+# otherwise the normal backlog applies, plus the stale files when include_stale_reviewed is on.
+if EXPLICIT_FORCE_FILE_IDS:
+    scope_filter = f"ot.file_id IN ({force_list})"
+else:
+    stale_part = f" OR ot.file_id IN ({force_list})" if STALE_FILE_IDS else ""
+    scope_filter = f"(st.file_id IS NULL OR {status_filter}{stale_part})"
 
 pages_df = spark.sql(f"""
   SELECT ot.file_id, ot.file_name, ot.page_index, ot.year, ot.doc_type_detected,
