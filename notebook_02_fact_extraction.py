@@ -17,6 +17,7 @@
 # MAGIC
 # MAGIC ## Version history
 # MAGIC
+# MAGIC - v2.9 (2026-10-17): A dry run now returns its counts as the notebook result (so the Databricks MCP can read them) and ends before Cell 7's preview.
 # MAGIC - v2.9 (2026-10-17): `include_stale_reviewed` widget (default false; Asana 1218716867008994, step 3). When true, every file with a page whose
 # MAGIC         ocr_transcriptions.reviewed_at is later than that page's silver_fact_extraction_status.attempted_at is re-extracted as a forced file
 # MAGIC         (its old facts are replaced after a successful run), in addition to the normal backlog or the force_file_ids list. This is the
@@ -651,6 +652,19 @@ else:
 
 if DRY_RUN:
     print("Dry run: nothing written.")
+    # Return the counts as the notebook result so a dry run started from the Databricks MCP (which cannot read printed output)
+    # can still report them. This ends the notebook here: Cell 7's preview of extracted facts is skipped on a dry run.
+    dbutils.notebook.exit(json.dumps({
+        "dry_run": True,
+        "include_stale_reviewed": INCLUDE_STALE_REVIEWED,
+        "stale_reviewed_files": len(STALE_FILE_IDS),
+        "forced_files": len(FORCE_FILE_IDS),
+        "pages_in_scope": len(work),
+        "pages_with_no_people": len(no_people_pages),
+        "pages_this_run": len(selected),
+        "gemini_calls_this_run": n_calls,
+        "gemini_calls_whole_backlog": sum(len(p["chunks"]) for p in work),
+    }))
 else:
     flush()
     print(f"\nRun totals: {totals['facts']} fact rows, {totals['pages']} page statuses, {totals['rejections']} link rejections logged")
