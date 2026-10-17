@@ -21,7 +21,7 @@ ORDER BY display_name, file_name, fact_type
 ```
 
 Group by person and then by file. Present them to Ed that way (one file at a time reads best on a phone).
-Check `refreshed_at` first: if notebook 03 has not run since the last match or extraction change, the list is stale.
+Check DQ-031 (or `refreshed_at`) first: files it lists changed since notebook 03 last compared them, so the list is stale until a scoped notebook 03 run (`mode=scoped`).
 
 ## 2. Triage each conflict: which fix applies?
 

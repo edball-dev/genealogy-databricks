@@ -63,9 +63,9 @@ Don't use `silver_document_person_override` (deprecated). Don't change `match_co
 Cell 5d2 of `notebook_01_document_matching` fills the primary's `page_index` and `person_index` from the override. It only
 updates a primary that has no link yet, otherwise it adds a `MENTION_OVERRIDE` row. Then:
 
-1. Run `notebook_01_document_matching` (Ed can run it in the UI, or Claude via `run_notebook`).
+1. Run `notebook_01_document_matching` with `mode=scoped` and `rematch_file_ids` set to those files (Ed in the UI, or Claude via `run_notebook` with parameters). Check `list_active_runs` first.
 2. If the linked document has facts, Ed runs a forced `notebook_02_fact_extraction` in the Databricks UI (`dry_run=false`, `force_file_ids` set to those files). The MCP identity cannot read the secret scope.
-3. `refresh_gold_source_coverage`, then `notebook_03_fact_comparison`, then `notebook_B_person_signals`, one serverless run at a time.
+3. `refresh_gold_source_coverage` (full, about 14 minutes), then `notebook_03_fact_comparison` with `mode=scoped`, then `notebook_B_person_signals`, one run at a time.
 4. Re-query the view. The linked primaries should be gone.
 
 Before running, check the git folder is on `main` (scheduled jobs run whatever is checked out).
