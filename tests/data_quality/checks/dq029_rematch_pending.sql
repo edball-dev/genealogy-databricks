@@ -8,19 +8,28 @@
 --   notebook_01 stamps ocr_transcriptions.last_matched_at on every file it considers. A file is
 --   listed here when something that feeds its match has changed since: REVIEW_CORRECTION (a page's
 --   reviewed_at is later), MENTION_CORRECTION (a silver_transcript_person_mention row's corrected_at
---   is later) or ALIAS_ADDED (a silver_person_alias row's created_at / updated_at is later and the
+--   is later), NEW_FILE (a page has no last_matched_at yet) or ALIAS_ADDED (a silver_person_alias row's created_at / updated_at is later and the
 --   alias could affect the file: its surname, a person it is matched to, or a mention surname).
 --   These are the files a scoped run (notebook_01 mode=scoped, Cell 4f) queues automatically; run it,
---   then refresh_gold_source_coverage, notebook 03 and B. Files never matched (last_matched_at NULL
---   on any page) and files whose every page has content_flag are not listed.
+--   then refresh_gold_source_coverage, notebook 03 and B. Files whose every page has content_flag are
+--   not listed. NEW_FILE rows are normal between an OCR run and the next matching run; they should
+--   not survive a nightly pipeline run.
 --
 --   Reported at info severity: a worklist, never files an Asana task. A nonzero count right after
 --   an edit is expected; a count that stays up across days means corrections are not being
 --   rematched. Aliases without audit values (rows older than 2026-10-17) and deleted aliases are
---   invisible to this check. The three trigger queries must stay identical to TRIGGERS in
+--   invisible to this check. The four trigger queries must stay identical to TRIGGERS in
 --   notebook_01 Cell 4f; change them together.
 
-WITH review AS (
+WITH new_file AS (
+  SELECT file_id, 'NEW_FILE' AS reason,
+    CONCAT(CAST(COUNT(*) - COUNT(last_matched_at) AS STRING), ' of ', CAST(COUNT(*) AS STRING), ' page(s) never matched') AS detail
+  FROM genealogy.ocr_transcriptions
+  GROUP BY file_id
+  HAVING COUNT(last_matched_at) < COUNT(*)
+     AND NOT BOOL_AND(COALESCE(content_flag, FALSE))
+),
+review AS (
   SELECT file_id, 'REVIEW_CORRECTION' AS reason,
     CONCAT('reviewed_at ', CAST(MAX(reviewed_at) AS STRING), ' after last_matched_at ', CAST(MIN(last_matched_at) AS STRING)) AS detail
   FROM genealogy.ocr_transcriptions
@@ -81,6 +90,8 @@ alias_files AS (
   FROM hits
   GROUP BY file_id
 )
+SELECT file_id, reason, detail FROM new_file
+UNION ALL
 SELECT file_id, reason, detail FROM review
 UNION ALL
 SELECT file_id, reason, detail FROM mention
