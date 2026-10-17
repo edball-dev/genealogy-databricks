@@ -111,12 +111,15 @@ Added 2026-10-17 (Asana 1218716867008994): a correction to a few files does not 
   scoped run also clears their page-level `gold_transcript_facts.person_gedcom_id` so Cell 5j re-links them.
   Cell 5k stamps `ocr_transcriptions.last_matched_at` and closes the queue rows.
 - **Automatic triggers (scoped mode, Cell 4f)**: `REVIEW_CORRECTION` (a page's `reviewed_at` after the file's
-  `last_matched_at`), `MENTION_CORRECTION` (a mention's `corrected_at` after it) and `ALIAS_ADDED` (an alias
+  `last_matched_at`), `MENTION_CORRECTION` (a mention's `corrected_at` after it), `ALIAS_ADDED` (an alias
   `created_at` / `updated_at` after it that the file could use: its surname, a matched person or a mention
-  surname). After adding an alias with the MCP, `mode=scoped` with no ids rematches just the affected files.
+  surname) and `NEW_FILE` (a page with no `last_matched_at`: a file OCR'd since the last run, so the nightly
+  job can run scoped). After adding an alias with the MCP, `mode=scoped` with no ids rematches just the affected files.
   Set `updated_at` / `updated_by` when you UPDATE an alias (inserts default `created_*`). Not detected:
-  aliases without audit values, deleted aliases (name the files in `rematch_file_ids` or run full) and
-  never-matched files (first-time matches come from a full run).
+  aliases without audit values and deleted aliases (name the files in `rematch_file_ids` or run full).
+  Cell 4f also sets the job task value `rematched_files` (files considered); `refresh_gold_source_coverage` has a
+  `rematched_files` widget that skips its rebuild when it is `0` (empty, the default, always rebuilds; the nightly
+  OCR job passes `{{tasks.document_matching.values.rematched_files}}`, the GEDCOM job passes nothing).
 - **Skip rule**: a file whose every page has `content_flag` is never matched. Its matches and exceptions are
   removed and `last_matched_at` is still stamped.
 - **Design points**: Cell 5c counts only Cell 5's own EXACT* rows as sibling votes (a scoped run votes on what
