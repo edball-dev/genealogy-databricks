@@ -19,7 +19,7 @@ every change in this repo.
   (serverless SQL, join patterns, type coercion).
 - When creating or changing files, give a Git commit message.
 - Consider whether a data-quality check should be added, changed or retired.
-- New tables get audit columns `created_at`, `created_by`, `updated_at`, `updated_by` (defaults on the `created_*` pair), and hand-maintained tables above all: a manual INSERT then records who and when. Existing tables get them when next touched (done so far: `silver_person_alias` via a one-off migration, `control_rematch_queue`).
+- New tables get audit columns `created_at`, `created_by`, `updated_at`, `updated_by` (defaults on the `created_*` pair), and hand-maintained tables above all: a manual INSERT then records who and when. Existing tables get them when next touched (done so far: `silver_person_alias` via a one-off migration, `control_rematch_queue`). Writers set `updated_at` / `updated_by` on UPDATE; an MCP INSERT records the service principal as `created_by`.
 - Prefer free solutions; if one costs money, set out the trade-off first.
 - Ed is the only contributor and often works from an Android phone.
 
@@ -57,21 +57,37 @@ every change in this repo.
 - `run_notebook` (MCP) runs whole notebooks only, so a step that must run alone
   needs its own notebook.
 - `run_notebook` starts a **new run on every call**; poll with `get_run` using the returned `run_id`,
-  never by calling it again (a duplicate TRUNCATE + INSERT run is the risk). Only one serverless run
-  can be active at a time. Observed durations: `refresh_gold_source_coverage` about 14 minutes,
-  notebook 03 about 2, notebook B about 1.
+  never by calling it again (a duplicate TRUNCATE + INSERT run is the risk). The free tier is meant to
+  run one serverless job at a time, but two ran together on 2026-10-17 (an interrupted `run_notebook`
+  call still launched a run, and overlapping notebook_01 rebuilds interleave deletes and inserts): check
+  `list_active_runs` before every `run_notebook` and after any interrupted call, and cancel both if two
+  are active. Observed durations: `notebook_01` about 6 minutes (full or a few files),
+  `refresh_gold_source_coverage` about 14, notebook 03 about 1, notebook B about 1.
 - **Refresh order after a date or year change**: `views_core_gold` (only if the
   definition changed), then notebook 07, `refresh_gold_source_coverage`, notebook 03,
   then notebook B. Score views from notebook D are live and need no rebuild.
   Check each table with `DESCRIBE HISTORY` afterwards.
 - Hand-editing a notebook as raw JSON needs JSON escaping and SQL escaping checked
   independently (SQL apostrophes are doubled, `''`). When unsure, reword to avoid the
-  apostrophe. `json.load()` will not catch invalid SQL.
+  apostrophe. `json.load()` will not catch invalid SQL. Edit `.ipynb` files from Python with
+  `json.load` and `json.dump(indent=1, ensure_ascii=False)` plus a trailing newline (keeps diffs
+  small), assert that each anchor text occurs exactly once, and build cell text with `.replace`, not
+  `%` formatting (a `%python` cell breaks it).
+- **Validating a rebuild or refactor of a table**: record the `DESCRIBE HISTORY` versions first, run,
+  then diff with `LEFT ANTI JOIN` against `VERSION AS OF` (removed, added, changed). Live-data tests
+  must be reversible: note the original values, label temporary rows `TEMP`, restore, then verify
+  against time travel. The MCP cannot read printed output, so a notebook meant to be driven from it
+  should end with `dbutils.notebook.exit(json)` (dry runs do); per-cell timings come from the commit
+  times in `DESCRIBE HISTORY`.
 - When saving a view's DDL to the repo from `SHOW CREATE`, qualify every table as
   `genealogy.<table>`; it prints unqualified names that only resolve in the original schema.
-- Two Spark SQL serverless gotchas: don't batch correlated `NOT EXISTS` subqueries
-  across checks into one query (optimizer bug; one FK check per query), and
-  `CONCAT` returning NULL silently breaks naive duplicate counts (use `GROUP BY ... HAVING COUNT(*) > 1`).
+- Spark SQL serverless gotchas: don't batch correlated `NOT EXISTS` subqueries
+  across checks into one query (optimizer bug; one FK check per query; it also hit table diffs, so
+  use one `LEFT ANTI JOIN` per direction); `CONCAT` returning NULL silently breaks naive duplicate
+  counts (use `GROUP BY ... HAVING COUNT(*) > 1`); `ALTER TABLE ... ADD COLUMNS IF NOT EXISTS` is
+  unsupported (use a migration notebook that checks `DESCRIBE`); a CTE read by several later CTEs is
+  re-expanded each time (queries returning zero rows had 0.5 to 6 million character plans), so build
+  the shared step once into a `tmp_` table with `CREATE OR REPLACE TABLE` and drop it after the last reader.
 - Always query live `ref_signal_weights` before editing scoring notebooks; weights drift.
 
 ## Schema gotchas

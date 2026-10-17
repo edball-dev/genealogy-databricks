@@ -51,7 +51,6 @@ Applies when working on `ocr_pipeline`, `notebook_01_document_matching`, `notebo
   ids missing from the tree. After renaming files: re-run notebook_01, then a forced `notebook_02` run
   (`force_file_ids`) for only those files, then `refresh_gold_source_coverage`, notebook 03 and B.
   Retire stale `WRONG_PERSON_MATCH` review marks once the pinned match supersedes them.
-- **Scoped rematch (2026-10-17)**: `notebook_01` has a `mode` widget. `full` (default) rebuilds everything as before; `scoped` rebuilds only the `file_id`s in `rematch_file_ids` plus pending `control_rematch_queue` rows (run Cell 4f first; it builds `tmp_scope`, which every later cell filters on). Scoped runs also clear the scoped files' page-level `gold_transcript_facts.person_gedcom_id` so Cell 5j re-links them. Cell 5k stamps `ocr_transcriptions.last_matched_at` and closes the queue rows. Cell 5c counts only Cell 5's own EXACT* rows as sibling votes (so a scoped run votes on what a full run sees) and resolves only scoped files; Cell 5i dedup still rewrites the whole table. Cells 5e to 5h3 build `genealogy.tmp_nb01_<cell>_candidate_names` scratch tables on every run and Cell 5h4 drops them again (a failed run can leave them until the next run): inlining that CTE chain gave multi-million-character plans. Observed 2026-10-17: a three-file scoped run takes about 6 minutes and a full run about 6 minutes, because the cost is now per-statement overhead. **Automatic triggers (scoped mode only, Cell 4f):** it queues `REVIEW_CORRECTION` (a page's `reviewed_at` after the file's `last_matched_at`), `MENTION_CORRECTION` (a mention's `corrected_at` after it) and `ALIAS_ADDED` (an alias `created_at` / `updated_at` after it that the file could use: its surname, a matched person, or a mention surname). So after adding an alias with the MCP, `mode=scoped` with no ids rematches just the affected files. Rules: set `updated_at` / `updated_by` when you UPDATE an alias (inserts default `created_*`); aliases without audit values and deleted aliases are not detected (name the files in `rematch_file_ids` or run full); never-matched files are not queued (first-time matches come from a full run); a file whose every page has `content_flag` is skipped (its matches are removed, `last_matched_at` is still stamped). DQ-029 lists files whose inputs changed since their last match (the same SQL as the triggers: change both together) and DQ-030 checks the queue. A scoped run still needs `refresh_gold_source_coverage`, notebook 03 and B afterwards. **Notebook 03 scoped (2026-10-17):** `mode=scoped` recompares the files in its `file_ids` widget plus the stale ones (facts `extracted_at` or the file's `last_matched_at` newer than its `gold_fact_comparison.refreshed_at`), so a scoped notebook_01 run followed by a scoped notebook_03 run recompares just the rematched files; `mode=full` (default) still deletes and refills everything. It needs one full refresh first (rows written before 2026-10-17 have no `refreshed_at`), and tree-side changes need a full refresh. DQ-031 lists the stale files (same SQL as notebook_03 Cell 0: change both together). **Notebook 02:** `include_stale_reviewed=true` also re-extracts, as forced files, every file with a page whose `reviewed_at` is later than its `silver_fact_extraction_status.attempted_at`; it is off by default because each page is a billed Gemini call, so read the dry-run counts first (the Gemini run itself still has to be started by Ed in the UI).
 - **Alias matching needs literal string equality** (`UPPER(TRIM(...))`). An alias does not help
   a document that spells the surname differently, however close.
 - **`silver_person_alias` is never rebuilt.** Notebook_01 Cell 1 only does `CREATE TABLE IF NOT EXISTS`.
@@ -67,7 +66,6 @@ Applies when working on `ocr_pipeline`, `notebook_01_document_matching`, `notebo
   must appear in the document's own extracted `personal_names` and be alive in the document year.
   Confidence is MEDIUM, not HIGH.
 - The id token must use an underscore or no separator (`[I_967018131]`, `[I332310876241]`). A hyphen (`[I-967018131]`) is silently ignored by the matcher and DQ-028, so the file falls back to name matching.
-- `notebook_01` Cell 5 deletes the scoped files' `silver_document_person` rows on every run (every row in a full run): a pinned match never needs a delete-and-reinsert, only a re-run.
 - Mention-to-match link: `silver_document_person` has nullable `page_index` and `person_index`.
   Key is `(file_id, page_index, person_index)`, joined null-safe (`<=>`). NULL means no known
   mention. Cell 5e writes it directly; Cell 5h2 links other rows by first forename and last name
@@ -101,6 +99,44 @@ Applies when working on `ocr_pipeline`, `notebook_01_document_matching`, `notebo
   marriage certificates is a matching-stage rule (Cell 5e), not an extraction-stage one.
 - `notebook_02_fact_extraction` fact guard is scoped per `(file_id, person_gedcom_id)`; the prompt
   takes forename/surname from the matched person's own tree name.
+
+## Scoped rematch and recompare
+
+Added 2026-10-17 (Asana 1218716867008994): a correction to a few files does not need a full rebuild.
+
+- **notebook_01 `mode`**: `full` (default) deletes and rebuilds every file, as before; `scoped` rebuilds only
+  the `file_id`s in `rematch_file_ids` plus pending `control_rematch_queue` rows. Cell 4f builds `tmp_scope`,
+  which every later cell filters on. Cell 5 deletes the scoped files' `silver_document_person` rows (every
+  row in a full run), so a pinned match needs only a re-run. Cell 4g clears the scoped files' exceptions; a
+  scoped run also clears their page-level `gold_transcript_facts.person_gedcom_id` so Cell 5j re-links them.
+  Cell 5k stamps `ocr_transcriptions.last_matched_at` and closes the queue rows.
+- **Automatic triggers (scoped mode, Cell 4f)**: `REVIEW_CORRECTION` (a page's `reviewed_at` after the file's
+  `last_matched_at`), `MENTION_CORRECTION` (a mention's `corrected_at` after it) and `ALIAS_ADDED` (an alias
+  `created_at` / `updated_at` after it that the file could use: its surname, a matched person or a mention
+  surname). After adding an alias with the MCP, `mode=scoped` with no ids rematches just the affected files.
+  Set `updated_at` / `updated_by` when you UPDATE an alias (inserts default `created_*`). Not detected:
+  aliases without audit values, deleted aliases (name the files in `rematch_file_ids` or run full) and
+  never-matched files (first-time matches come from a full run).
+- **Skip rule**: a file whose every page has `content_flag` is never matched. Its matches and exceptions are
+  removed and `last_matched_at` is still stamped.
+- **Design points**: Cell 5c counts only Cell 5's own EXACT* rows as sibling votes (a scoped run votes on what
+  a full run sees) and resolves only scoped files; Cell 5i dedup still rewrites the whole table. Cells 5e to
+  5h3 build `genealogy.tmp_nb01_<cell>_candidate_names` once per run and Cell 5h4 drops them (a failed run
+  leaves them until the next run).
+- **notebook_03 `mode`**: `scoped` recompares the files in `file_ids` plus the stale ones (facts `extracted_at`
+  or the file's `last_matched_at` newer than its `gold_fact_comparison.refreshed_at`); `full` (default)
+  deletes and refills everything. It needs one full refresh first (rows written before 2026-10-17 have no
+  `refreshed_at`), and tree-side changes need a full refresh.
+- **notebook_02 `include_stale_reviewed=true`**: also re-extracts, as forced files, every file with a page whose
+  `reviewed_at` is later than its `silver_fact_extraction_status.attempted_at`. Off by default because each
+  page is a billed Gemini call: read the dry-run counts (returned as the notebook result) first. The Gemini
+  run itself still has to be started by Ed in the UI.
+- **Correction order**: edit (alias, mention, transcript or review mark), then `notebook_01` `mode=scoped`;
+  a forced `notebook_02` if the transcript or a mention changed (Ed, in the UI); `refresh_gold_source_coverage`
+  (full, about 14 minutes: the slow step, not scoped yet); `notebook_03` `mode=scoped`; notebook B.
+- **Checks**: DQ-029 (files whose inputs changed since their last match; same SQL as the triggers), DQ-031
+  (files whose facts or match changed since their comparison; same SQL as notebook_03 Cell 0) and DQ-030
+  (queue health). Change each pair together.
 
 ## Source coverage
 

@@ -15,6 +15,7 @@ Check-file format, Tier 1 check types, run surfaces, flags and Asana behaviour:
   deploy anything there.
 - Tier 2 IDs are stable and never renumbered (DQ-003 and DQ-007 are intentionally absent).
 - Validate a new check's baseline row count against live data before shipping it.
+- Worklist checks (DQ-010, DQ-024, DQ-029, DQ-031) are `info`: a nonzero count after an edit is expected. DQ-029 and DQ-031 repeat the SQL of notebook_01 Cell 4f and notebook_03 Cell 0, so change each pair together; DQ-030 checks `control_rematch_queue`.
 - A check and the algorithm it guards share the same tolerance window; change them together.
 - A static per-row check is the wrong shape when most rows fail by design (e.g. DNA `active`
   NULLs). Use a drift-monitoring check instead (Test Plan section 4, backlog item 8).
