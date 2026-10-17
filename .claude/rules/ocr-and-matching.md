@@ -51,6 +51,7 @@ Applies when working on `ocr_pipeline`, `notebook_01_document_matching`, `notebo
   ids missing from the tree. After renaming files: re-run notebook_01, then a forced `notebook_02` run
   (`force_file_ids`) for only those files, then `refresh_gold_source_coverage`, notebook 03 and B.
   Retire stale `WRONG_PERSON_MATCH` review marks once the pinned match supersedes them.
+- **Scoped rematch (2026-10-17)**: `notebook_01` has a `mode` widget. `full` (default) rebuilds everything as before; `scoped` rebuilds only the `file_id`s in `rematch_file_ids` plus pending `control_rematch_queue` rows (run Cell 4f first; it builds `tmp_scope`, which every later cell filters on). Scoped runs also clear the scoped files' page-level `gold_transcript_facts.person_gedcom_id` so Cell 5j re-links them. Cell 5k stamps `ocr_transcriptions.last_matched_at` and closes the queue rows. Limits: Cell 5c re-votes only scoped files, and Cell 5i dedup still rewrites the whole table. A scoped run still needs `refresh_gold_source_coverage`, notebook 03 and B afterwards (notebook 03 scoping is a later step of Asana 1218716867008994).
 - **Alias matching needs literal string equality** (`UPPER(TRIM(...))`). An alias does not help
   a document that spells the surname differently, however close.
 - **`silver_person_alias` is never rebuilt.** Notebook_01 Cell 1 only does `CREATE TABLE IF NOT EXISTS`.
@@ -58,7 +59,7 @@ Applies when working on `ocr_pipeline`, `notebook_01_document_matching`, `notebo
   `execute_write_sql`; never put `CREATE OR REPLACE` or `TRUNCATE` on it. Derived MARRIED_NAME and
   FATHER_SURNAME rows come from `notebook_sync_derived_aliases` (job task `Sync_Derived_Aliases`, after
   `Materialise_Gold_Tables` in the GEDCOM job), which is insert-only; it never removes rows, so a stale
-  derived row must be deleted by hand. DQ-026 reports derived rows that are missing or stale. After adding rows: re-run the matching cells, `refresh_gold_source_coverage`, notebook 03,
+  derived row must be deleted by hand. DQ-026 reports derived rows that are missing or stale. After adding rows: re-run the matching cells (or a scoped rematch of the affected files), `refresh_gold_source_coverage`, notebook 03,
   then notebook B.
 - **Spouse inference applies to marriage certificates only** (structurally unambiguous via
   `silver_family`), with a year guard of +/-2 of that family unit's marriage year.

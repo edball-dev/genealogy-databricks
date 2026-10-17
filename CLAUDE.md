@@ -19,6 +19,7 @@ every change in this repo.
   (serverless SQL, join patterns, type coercion).
 - When creating or changing files, give a Git commit message.
 - Consider whether a data-quality check should be added, changed or retired.
+- New tables get audit columns `created_at`, `created_by`, `updated_at`, `updated_by` (defaults on the `created_*` pair), and hand-maintained tables above all: a manual INSERT then records who and when. Existing tables get them when next touched (done so far: `silver_person_alias`, `control_rematch_queue`).
 - Prefer free solutions; if one costs money, set out the trade-off first.
 - Ed is the only contributor and often works from an Android phone.
 
